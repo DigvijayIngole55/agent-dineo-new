@@ -3,96 +3,129 @@
 import os
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Union
-from smolagents import Agent, Conversation, Reasoner
-
+from smolagents import CodeAgent, DuckDuckGoSearchTool, tool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFaceEmbeddings
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from smolagents import ChatMessage
+
+load_dotenv()
 
 
-
-#Calculation tools
-
+@tool
 def multiply(a: float, b: float) -> float:
-    """Multiply two numbers."""
+    """Multiply two numbers.
+    
+    Args:
+        a: First number to multiply
+        b: Second number to multiply
+    """
     return a * b
 
+@tool
 def add(a: float, b: float) -> float:
-    """Add two numbers."""
+    """Add two numbers.
+    
+    Args:
+        a: First number to add
+        b: Second number to add
+    """
     return a + b
 
+@tool
 def subtract(a: float, b: float) -> float:
-    """Subtract two numbers."""
+    """Subtract two numbers.
+    
+    Args:
+        a: Number to subtract from
+        b: Number to subtract
+    """
     return a - b
 
+@tool
 def divide(a: float, b: float) -> float:
-    """Divide two numbers."""
+    """Divide two numbers.
+    
+    Args:
+        a: Numerator
+        b: Denominator
+    """
     if b == 0:
         raise ValueError("Cannot divide by zero.")
     return a / b
 
+@tool
 def modulus(a: float, b: float) -> float:
-    """Get the modulus of two numbers."""
+    """Get the modulus of two numbers.
+    
+    Args:
+        a: First number
+        b: Second number
+    """
     return a % b
 
-class ToolAgent(Agent):
-    """Agent that can use tools to solve problems."""
-    
-    def __init__(self, llm, tools):
-        self.llm = llm
-        self.tools = tools
-        
-    def run(self, query: str) -> str:
-        """Process a query using available tools."""
-        # Basic implementation - in practice, you'd have
-        # logic to determine which tool to use
-        # response = self.llm.invoke(query)
-        # return response.content
+def get_llm(provider: str = "groq"):
+    """Get language model based on provider"""
+    if provider == "groq":
         try:
-            response = self.llm.invoke([HumanMessage(content=query)])
-            return response.content
-        except Exception as e:
-            print(f"Tool agent error: {e}")
-            return f"I encountered an error: {str(e)}"
-
-def get_llm(provider: str = "google"):
-    if provider == "google":
-        return ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
-    elif provider == "groq":
-        return ChatGroq(model="qwen-qwq-32b", temperature=0)
+            from langchain_groq import ChatGroq
+            return ChatGroq(model="qwen-qwq-32b", temperature=0)
+        except ImportError:
+            print("langchain_groq not available. Using HfApiModel instead.")
+            from smolagents import HfApiModel
+            return HfApiModel()
     elif provider == "huggingface":
-        return ChatHuggingFace(
-            llm=HuggingFaceEndpoint(
-                url="https://api-inference.huggingface.co/models/Meta-DeepLearning/llama-2-7b-chat-hf",
-            ),
-        )
+        try:
+            from smolagents import HfApiModel
+            return HfApiModel()
+        except ImportError:
+            print("HfApiModel not available.")
+            raise ImportError("No suitable model found")
     else:
-        raise ValueError("Invalid provider. Choose 'google', 'groq' or 'huggingface'.")
-
+        raise ValueError("Invalid provider. Choose 'groq' or 'huggingface'.")
 def create_agent(provider: str = "google"):
     """Create a SmolaGents application"""
-    llm = get_llm(provider)
-    
-    # Define available tools
-    tools = [
-        multiply,
-        add,
-        subtract,
-        divide,
-        modulus,
-    ]
-    
-    tool_agent = ToolAgent(llm, tools)
-    
-    # Create a conversation flow using reasoner
-    reasoner = Reasoner([
-        tool_agent
-    ])
-
-    return reasoner
+    try:
+        from smolagents import HfApiModel, CodeAgent
+        
+        try:
+            model = get_llm(provider)
+        except:
+            print(f"Failed to get model for {provider}, falling back to HfApiModel")
+            model = HfApiModel()
+        
+        tools = [
+            multiply,
+            add,
+            subtract,
+            divide,
+            modulus,
+        ]
+        
+        agent = CodeAgent(tools=tools, model=model)
+        return agent
+        
+    except Exception as e:
+        print(f"Error creating agent: {e}")
+        return None
 
 if __name__ == "__main__":
-    agent_app = create_agent("google")
-    response = agent_app("What is the capital of France?")
-    print(response)
+    try:
+        agent_app = create_agent("google")
+        if agent_app:
+            print("Agent created successfully!")
+            
+            print("Type 'exit' to quit")
+            while True:
+                query = input("\nYour question: ")
+                if query.lower() in ['exit', 'quit']:
+                    break
+                    
+                try:
+                    response = agent_app.run(query)
+                    print(f"\nResponse: {response}")
+                except Exception as e:
+                    print(f"\nError running agent: {e}")
+        else:
+            print("Failed to create agent.")
+    except Exception as e:
+        print(f"Error: {e}")
