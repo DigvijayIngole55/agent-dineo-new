@@ -94,6 +94,52 @@ def wiki_search(query: str) -> dict:
     
     except Exception as e:
         return {"wiki_results": f"Error searching Wikipedia: {str(e)}"}
+    
+@tool
+def arxiv_search(query: str, max_results: int = 3) -> dict:
+    """Search arXiv for academic papers based on a query and return results.
+    
+    Args:
+        query: The search query for academic papers.
+        max_results: Maximum number of results to return (default: 3).
+    """
+    try:
+        import arxiv
+        
+        client = arxiv.Client(
+            page_size=max_results,
+            delay_seconds=3,  
+            num_retries=3
+        )
+        
+        search = arxiv.Search(
+            query=query,
+            max_results=max_results,
+            sort_by=arxiv.SortCriterion.Relevance
+        )
+        
+        results = []
+        for paper in client.results(search):
+            paper_info = {
+                "title": paper.title,
+                "authors": [author.name for author in paper.authors],
+                "summary": paper.summary,
+                "published": paper.published.strftime("%Y-%m-%d") if paper.published else None,
+                "url": paper.entry_id,
+                "pdf_url": paper.pdf_url,
+                "categories": paper.categories
+            }
+            results.append(paper_info)
+        
+        if not results:
+            return {"arxiv_results": "No arXiv papers found for the query: " + query}
+        
+        return {"arxiv_results": results}
+    
+    except ImportError:
+        return {"arxiv_results": "Error: The arxiv package is not installed. Install it with 'pip install arxiv'."}
+    except Exception as e:
+        return {"arxiv_results": f"Error searching arXiv: {str(e)}"}
 
 @tool
 def web_search(query: str) -> str:
@@ -164,7 +210,8 @@ def create_agent(provider: str = "google"):
             divide,
             modulus,
             web_search,
-            wiki_search
+            wiki_search,
+            arxiv_search
         ]
         
         agent = ToolCallingAgent(tools=tools, model=model)
