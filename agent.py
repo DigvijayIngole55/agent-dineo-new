@@ -63,6 +63,19 @@ def modulus(a: float, b: float) -> float:
     """
     return a % b
 
+@tool
+def web_search(query: str) -> str:
+    """Search DuckDuckGo for a query and return results.
+    
+    Args:
+        query: The search query.
+    """
+    search_tool = DuckDuckGoSearchTool()
+    search_results = search_tool(query)
+    
+    
+    return {"web_results": search_results}
+
 def get_llm(provider: str = "groq"):
     """Get language model based on provider"""
     if provider == "groq":
@@ -99,6 +112,7 @@ def create_agent(provider: str = "google"):
             subtract,
             divide,
             modulus,
+            web_search
         ]
         
         agent = CodeAgent(tools=tools, model=model)
