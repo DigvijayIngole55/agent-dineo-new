@@ -264,7 +264,7 @@ def get_llm(provider: str = "google"):
     if provider == "google":
         try:
             return LiteLLMModel(
-                model_id="gemini/gemini-2.0-flash",
+                model_id="gemini/gemini-2.0-flash-lite",
                 api_key=os.getenv("GOOGLE_API_KEY")
             )
         except ImportError:
