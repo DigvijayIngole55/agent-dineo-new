@@ -3,6 +3,8 @@ import gradio as gr
 import requests
 import inspect
 import pandas as pd
+from agent import create_agent
+
 
 # (Keep Constants as is)
 # --- Constants ---
@@ -12,12 +14,17 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
 class BasicAgent:
     def __init__(self):
-        print("BasicAgent initialized.")
+        print("Initializing SmolAgent...")
+        # Create your agent using the function from agent.py
+        self.agent = create_agent("google")
+        print("SmolAgent initialized successfully")
+
     def __call__(self, question: str) -> str:
         print(f"Agent received question (first 50 chars): {question[:50]}...")
-        fixed_answer = "This is a default answer."
-        print(f"Agent returning fixed answer: {fixed_answer}")
-        return fixed_answer
+        # Use your agent's run method to get an answer
+        answer = self.agent.run(question)
+        print(f"Agent returning answer: {answer[:50]}...")
+        return answer
 
 def run_and_submit_all( profile: gr.OAuthProfile | None):
     """
