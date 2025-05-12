@@ -7,6 +7,7 @@ from langchain_community.document_loaders import WikipediaLoader
 import pandas as pd
 import json
 import uuid
+import time
 import numpy as np
 from datetime import datetime
 from urllib.parse import urlparse
@@ -211,18 +212,53 @@ def arxiv_search(query: str, max_results: int = 3) -> dict:
     except Exception as e:
         return {"arxiv_results": f"Error searching arXiv: {str(e)}"}
 
+# @tool
+# def web_search(query: str) -> dict:
+#     """Search DuckDuckGo for a query and return results.
+
+#     Args:
+#         query: The search query.
+#     """
+#     search_tool = DuckDuckGoSearchTool()
+#     search_results = search_tool(query)
+    
+#     return {"web_results": search_results}
+
+_last_web_call = 0.0
+_web_retries   = 5
+_min_interval  = 2.0
+
 @tool
 def web_search(query: str) -> dict:
-    """Search DuckDuckGo for a query and return results.
-
-    Args:
-        query: The search query.
-    """
-    search_tool = DuckDuckGoSearchTool()
-    search_results = search_tool(query)
+    """Rate-limited DuckDuckGo search (2 s min interval + 5× retries).
     
-    return {"web_results": search_results}
+    Args:
+        query: The search query string to look up on DuckDuckGo.
+    """
+    global _last_web_call
 
+    # Throttle: ensure ≥2 s between actual HTTP calls
+    elapsed = time.time() - _last_web_call
+    if elapsed < _min_interval:
+        time.sleep(_min_interval - elapsed)
+
+    # Attempt + exponential back-off on rate-limit
+    for attempt in range(_web_retries):
+        try:
+            ddg = DuckDuckGoSearchTool()
+            results = ddg(query)
+            _last_web_call = time.time()
+            return {"web_results": results}
+
+        except Exception as e:
+            msg = str(e)
+            if "202 Ratelimit" in msg and attempt < _web_retries - 1:
+                backoff = (2 ** attempt) * _min_interval
+                time.sleep(backoff)
+                continue
+
+            # Final failure
+            return {"web_results": f"Search failed after {attempt+1} attempts: {msg}"}
 def get_llm(provider: str = "google"):
     """Get language model based on provider"""
     if provider == "google":
