@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from functools import wraps
 from smolagents import ToolCallingAgent, DuckDuckGoSearchTool, tool, ChatMessage, LiteLLMModel, CodeAgent, PythonInterpreterTool
 from langchain_community.document_loaders import WikipediaLoader
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
 import pandas as pd
 import json
 import uuid
@@ -13,6 +14,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 import tempfile
 import requests
+from bs4 import BeautifulSoup
 
 print("[DEBUG] Loading environment variables...")
 load_dotenv()
@@ -284,49 +286,53 @@ _min_interval  = 2.0
 
 @tool
 def web_search(query: str) -> dict:
-    """Rate-limited DuckDuckGo search (2 s min interval + 5× retries).
-    
+    """Search DuckDuckGo for a query and return results.
+
     Args:
-        query: The search query string to look up on DuckDuckGo.
+        query: The search query.
     """
-    global _last_web_call
     print(f"[DEBUG] web_search called with query: {query}")
-    print(f"[DEBUG] Current state: last_call={_last_web_call}, retries={_web_retries}, min_interval={_min_interval}")
-
-    # Throttle: ensure ≥2 s between actual HTTP calls
-    elapsed = time.time() - _last_web_call
-    print(f"[DEBUG] Time elapsed since last call: {elapsed:.2f}s")
-    if elapsed < _min_interval:
-        sleep_time = _min_interval - elapsed
-        print(f"[DEBUG] Rate limiting - sleeping for {sleep_time:.2f}s")
-        time.sleep(sleep_time)
-
-    # Attempt + exponential back-off on rate-limit
-    for attempt in range(_web_retries):
-        try:
-            print(f"[DEBUG] Search attempt {attempt+1}/{_web_retries}")
-            ddg = DuckDuckGoSearchTool()
-            print(f"[DEBUG] Calling DuckDuckGoSearchTool with query: {query}")
-            results = ddg(query)
-            _last_web_call = time.time()
-            print(f"[DEBUG] Search successful, updating last_web_call to {_last_web_call}")
-            print(f"[DEBUG] Got {len(results) if isinstance(results, list) else 'non-list'} results")
-            return {"web_results": results}
-
-        except Exception as e:
-            msg = str(e)
-            print(f"[DEBUG] Search attempt {attempt+1} failed with error: {msg}")
-            if "202 Ratelimit" in msg and attempt < _web_retries - 1:
-                backoff = (2 ** attempt) * _min_interval
-                print(f"[DEBUG] Rate limit hit, backing off for {backoff:.2f}s")
-                time.sleep(backoff)
-                continue
-            else:
-                print(f"[DEBUG] Maximum retries reached or non-ratelimit error")
-
-            # Final failure
-            print(f"[DEBUG] All attempts failed, returning error message")
-            return {"web_results": f"Search failed after {attempt+1} attempts: {msg}"}
+    try:
+        # Use DuckDuckGo API wrapper for more reliable results
+        search = DuckDuckGoSearchAPIWrapper(max_results=5)
+        
+        # Add rate limiting (keeping your existing rate limiting logic)
+        global _last_web_call
+        elapsed = time.time() - _last_web_call
+        if elapsed < _min_interval:
+            sleep_time = _min_interval - elapsed
+            print(f"[DEBUG] Rate limiting - sleeping for {sleep_time:.2f}s")
+            time.sleep(sleep_time)
+        
+        # Execute the search with retries
+        for attempt in range(_web_retries):
+            try:
+                print(f"[DEBUG] Search attempt {attempt+1}/{_web_retries}")
+                results = search.run(query)
+                _last_web_call = time.time()
+                print(f"[DEBUG] Search successful, updating last_web_call to {_last_web_call}")
+                
+                if not results or results.strip() == "":
+                    return {"web_results": "No search results found."}
+                    
+                return {"web_results": results}
+            except Exception as e:
+                msg = str(e)
+                print(f"[DEBUG] Search attempt {attempt+1} failed with error: {msg}")
+                if "rate" in msg.lower() and attempt < _web_retries - 1:
+                    backoff = (2 ** attempt) * _min_interval
+                    print(f"[DEBUG] Rate limit hit, backing off for {backoff:.2f}s")
+                    time.sleep(backoff)
+                    continue
+                
+                # Final failure
+                if attempt == _web_retries - 1:
+                    print(f"[DEBUG] All attempts failed, returning error message")
+                    return {"web_results": f"Search failed after {attempt+1} attempts: {msg}"}
+                
+    except Exception as e:
+        print(f"[DEBUG] Error in web_search: {str(e)}")
+        return {"web_results": f"Search error: {str(e)}"}
 def get_llm(provider: str = "google"):
     """Get language model based on provider"""
     print(f"[DEBUG] get_llm called with provider: {provider}")
