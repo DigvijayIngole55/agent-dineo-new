@@ -180,6 +180,7 @@ def analyze_tabular_file(file_path: str) -> str:
         return f"Error analyzing file: {str(e)}"
 
 @tool
+@limit_calls(3)  
 def wiki_search(query: str) -> dict:
     """Search Wikipedia for a query and return maximum 2 results.
 
@@ -273,6 +274,7 @@ def arxiv_search(query: str, max_results: int = 3) -> dict:
         print(f"[DEBUG] Error in arxiv_search: {str(e)}")
         return {"arxiv_results": f"Error searching arXiv: {str(e)}"}
 @tool
+@limit_calls(5)  
 def web_search(query: str) -> dict:
     """Search Serper API for a query and return results.
 
@@ -498,6 +500,11 @@ if __name__ == "__main__":
             break
         
         try:
+            # Reset the limit_calls counters for each new question
+            # This requires modifying the limit_calls decorator to expose a reset method
+            wiki_search.__wrapped__.__closure__[0].cell_contents['count'] = 0
+            web_search.__wrapped__.__closure__[0].cell_contents['count'] = 0
+            
             print("\n[Searching and generating answer...]")
             print(f"[DEBUG] Running agent with query: '{query}'")
             
@@ -509,6 +516,14 @@ if __name__ == "__main__":
             
             print(f"\nResponse: {resp}")
                 
+        except RuntimeError as e:
+            if "Call limit reached" in str(e):
+                print(f"[DEBUG] Search limit reached: {str(e)}")
+                print("\n[Note]: Search limit reached. Moving on with partial results.")
+                # Optionally, you could have the agent provide a response with what it found so far
+            else:
+                print(f"[DEBUG] RuntimeError: {str(e)}")
+                print(f"\n[Error]: {str(e)}")
         except Exception as e:
             print(f"[DEBUG] Exception in agent.run: {type(e).__name__}: {str(e)}")
             print(f"\n[Error]: An unexpected error occurred: {str(e)}")
