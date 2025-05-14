@@ -487,7 +487,7 @@ def check_search_results(response: str) -> bool:
 if __name__ == "__main__":
     print(f"[DEBUG] Starting main execution")
     print(f"[DEBUG] Creating agent with Google provider")
-    agent = create_agent("google")
+    agent = create_agent("groq")
     print("Agent created. Type 'exit' to quit.")
     
     while True:
