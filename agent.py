@@ -1,57 +1,237 @@
 import os
-from dotenv import load_dotenv
-from typing import List, Dict, Any, Optional
-from functools import wraps
-from smolagents import ToolCallingAgent, DuckDuckGoSearchTool, tool, ChatMessage, LiteLLMModel, CodeAgent, PythonInterpreterTool
-from langchain_community.document_loaders import WikipediaLoader
-from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
-import pandas as pd
-import json
-import uuid
-import time
-import numpy as np
-from datetime import datetime
-from urllib.parse import urlparse
 import tempfile
+import time
+import re
+import json
+from typing import List, Optional, Dict, Any
+from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
+from difflib import SequenceMatcher
+from dotenv import load_dotenv
 
-# Web search rate limiting and retry parameters
-_web_retries = 3
-_min_interval = 1.0  # Minimum time between web search calls in seconds
-_last_web_call = 0   # Last time a web search was made
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper, WikipediaAPIWrapper
+from langchain.agents import Tool, AgentExecutor, initialize_agent, AgentType
+from langchain.memory import ConversationBufferMemory
+from langchain.tools import BaseTool, Tool
+from langchain_community.document_loaders import WikipediaLoader
+import google.generativeai as genai
+from pydantic import Field
 
-print("[DEBUG] Loading environment variables...")
+# Set up debug flag - set to True to enable detailed debugging
+DEBUG = True
+
+def debug_print(message):
+    """Helper function to print debug messages when DEBUG is True"""
+    if DEBUG:
+        print(f"[DEBUG] {message}")
+
+debug_print("Starting agent initialization")
+
+# Load environment variables
 load_dotenv()
+debug_print("Environment variables loaded")
 
-prompt_path = os.getenv("SYSTEM_PROMPT_PATH", "system_prompt.txt")
-print(f"[DEBUG] Loading system prompt from: {prompt_path}")
-with open(prompt_path, "r", encoding="utf-8") as f:
-    system_prompt = f.read()
-print(f"[DEBUG] System prompt loaded, length: {len(system_prompt)} characters")
+# Load system prompt from environment variable or file
+system_prompt = os.getenv("SYSTEM_PROMPT")
+if system_prompt:
+    print(f"System prompt loaded from environment variable, length: {len(system_prompt)} characters")
+else:
+    system_prompt_path = os.getenv("SYSTEM_PROMPT_PATH", "system_prompt.txt")
+    print(f"Loading system prompt from file: {system_prompt_path}")
+    try:
+        with open(system_prompt_path, "r", encoding="utf-8") as f:
+            system_prompt = f.read()
+        print(f"System prompt loaded from file, length: {len(system_prompt)} characters")
+    except Exception as e:
+        print(f"Error loading system prompt: {str(e)}")
+        system_prompt = "You are a helpful assistant."
+        debug_print(f"Using default system prompt due to error: {str(e)}")
 
-def limit_calls(max_calls: int):
-    """Decorator to limit function calls to max_calls."""
-    print(f"[DEBUG] Setting up limit_calls decorator with max_calls={max_calls}")
-    def decorator(func):
-        calls = {'count': 0}
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            print(f"[DEBUG] Function {func.__name__} call count: {calls['count']}/{max_calls}")
-            if calls['count'] >= max_calls:
-                print(f"[DEBUG] Call limit reached for {func.__name__}: {calls['count']}/{max_calls}")
-                raise RuntimeError(
-                    f"Call limit reached: {func.__name__} may only be called {max_calls} times"
-                )
-            calls['count'] += 1
-            print(f"[DEBUG] Executing {func.__name__} (call {calls['count']}/{max_calls})")
-            result = func(*args, **kwargs)
-            print(f"[DEBUG] Function {func.__name__} execution completed")
-            return result
-        return wrapper
-    return decorator
+class WebSearchTool:
+    """Tool for performing web searches with rate limiting and retries with fallback to Serper API."""
+    
+    def __init__(self):
+        self.name = "web_search"
+        self.description = "Search the web for a query and return results."
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # Minimum time between requests in seconds
+        self.max_retries = 3
+        # Check if Serper API key is available
+        self.serper_api_key = os.getenv("SERPER_API_KEY")
+        if self.serper_api_key:
+            debug_print("Serper API key found, will use as fallback or primary search provider")
+        else:
+            debug_print("No Serper API key found, will only use DuckDuckGo")
+    
+    def __call__(self, query: str) -> str:
+        """Perform web search with rate limiting and retries."""
+        debug_print(f"Web searching for: {query}")
+        
+        # If Serper API key is available and specified as primary, use it directly
+        if self.serper_api_key and os.getenv("USE_SERPER_PRIMARY", "false").lower() == "true":
+            debug_print("Using Serper as primary search provider")
+            return self._serper_search(query)
+        
+        # Otherwise try DuckDuckGo first with fallback to Serper
+        for attempt in range(self.max_retries):
+            # Implement rate limiting
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.min_request_interval:
+                sleep_time = self.min_request_interval - time_since_last
+                debug_print(f"Rate limiting: sleeping for {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+            
+            try:
+                # Try DuckDuckGo first
+                debug_print("Initializing DuckDuckGoSearchAPIWrapper")
+                search = DuckDuckGoSearchAPIWrapper(max_results=5)
+                debug_print("Executing DuckDuckGo search")
+                results = search.run(query)
+                
+                if not results or results.strip() == "":
+                    debug_print("No DuckDuckGo search results found")
+                    if self.serper_api_key:
+                        debug_print("Falling back to Serper API")
+                        return self._serper_search(query)
+                    return {"web_results": "No search results found."}
+                    
+                debug_print(f"Web search returned results (length: {len(results)})")
+                self.last_request_time = time.time()
+                return {"web_results": results}
+            
+            except Exception as e:
+                debug_print(f"DuckDuckGo search error in attempt {attempt+1}: {str(e)}")
+                if self.serper_api_key:
+                    debug_print("Falling back to Serper API due to DuckDuckGo error")
+                    return self._serper_search(query)
+                
+                if attempt < self.max_retries - 1:
+                    # Exponential backoff
+                    wait_time = (2 ** attempt) * self.min_request_interval
+                    debug_print(f"Waiting {wait_time:.2f}s before retry")
+                    time.sleep(wait_time)
+                else:
+                    return {"web_results": f"Search error after {self.max_retries} attempts: {str(e)}"}
+        
+        # If we get here and have Serper as fallback, try it
+        if self.serper_api_key:
+            debug_print("Falling back to Serper API after all DuckDuckGo retries failed")
+            return self._serper_search(query)
+            
+        return {"web_results": "Search failed due to rate limiting"}
+    
+    def _serper_search(self, query: str) -> dict:
+        """Perform search using Serper API."""
+        debug_print(f"Searching with Serper API: {query}")
+        try:
+            url = "https://google.serper.dev/search"
+            payload = json.dumps({
+                "q": query,
+                "gl": "us",
+                "hl": "en",
+                "num": 5
+            })
+            headers = {
+                'X-API-KEY': self.serper_api_key,
+                'Content-Type': 'application/json'
+            }
+            
+            response = requests.post(url, headers=headers, data=payload, timeout=10)
+            response.raise_for_status()
+            
+            search_results = response.json()
+            
+            # Format results
+            formatted_results = []
+            
+            # Extract organic results
+            if "organic" in search_results:
+                for result in search_results["organic"][:5]:
+                    title = result.get("title", "")
+                    link = result.get("link", "")
+                    snippet = result.get("snippet", "")
+                    formatted_results.append(f"[{title}]({link})\n{snippet}\n")
+            
+            # Extract knowledge graph if available
+            if "knowledgeGraph" in search_results:
+                kg = search_results["knowledgeGraph"]
+                title = kg.get("title", "")
+                type_text = kg.get("type", "")
+                description = kg.get("description", "")
+                formatted_results.append(f"Knowledge Graph: {title} ({type_text})\n{description}\n")
+            
+            if not formatted_results:
+                return {"web_results": "No search results found from Serper."}
+                
+            return {"web_results": "## Search Results\n\n" + "\n".join(formatted_results)}
+            
+        except Exception as e:
+            debug_print(f"Serper API search error: {str(e)}")
+            return {"web_results": f"Serper search error: {str(e)}"}
 
-@tool
+class WikiSearchTool:
+    """Tool for searching Wikipedia with rate limiting."""
+    
+    def __init__(self):
+        self.name = "wiki_search"
+        self.description = "Search Wikipedia for a query and return maximum 2 results."
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # Minimum time between requests in seconds
+        self.max_calls = 3
+        self.call_count = 0
+    
+    def __call__(self, query: str) -> str:
+        """Search Wikipedia for a query."""
+        debug_print(f"Searching Wikipedia for: {query}")
+        
+        # Check call limit
+        self.call_count += 1
+        if self.call_count > self.max_calls:
+            debug_print(f"Call limit reached for wiki_search: {self.call_count}/{self.max_calls}")
+            return {"wiki_results": f"Call limit reached: wiki_search may only be called {self.max_calls} times"}
+        
+        # Implement rate limiting
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < self.min_request_interval:
+            sleep_time = self.min_request_interval - time_since_last
+            debug_print(f"Rate limiting: sleeping for {sleep_time:.2f}s")
+            time.sleep(sleep_time)
+        
+        try:
+            debug_print("Initializing WikipediaLoader")
+            search_docs = WikipediaLoader(query=query, load_max_docs=2).load()
+            debug_print(f"Found {len(search_docs)} Wikipedia documents")
+            
+            results = []
+            for i, doc in enumerate(search_docs):
+                title = doc.metadata.get("title", "")
+                source = doc.metadata.get("source", "")
+                page_content = doc.page_content
+                
+                debug_print(f"Wiki result {i+1}: Title={title}, URL={source}, Content length={len(page_content)}")
+                
+                results.append({
+                    "title": title,
+                    "url": source,
+                    "content": page_content
+                })
+            
+            if not results:
+                debug_print("No Wikipedia results found")
+                return {"wiki_results": "No Wikipedia results found for the query: " + query}
+            
+            self.last_request_time = time.time()
+            return {"wiki_results": results}
+        
+        except Exception as e:
+            debug_print(f"Error searching Wikipedia: {str(e)}")
+            return {"wiki_results": f"Error searching Wikipedia: {str(e)}"}
+
 def download_from_url(url: str, filename: Optional[str] = None) -> str:
     """
     Download a file from a URL and save it to a temporary location.
@@ -63,71 +243,76 @@ def download_from_url(url: str, filename: Optional[str] = None) -> str:
     Returns:
         Path to the downloaded file
     """
-    print(f"[DEBUG] download_from_url called with URL: {url}, filename: {filename}")
+    debug_print(f"Attempting to download from URL: {url}, filename: {filename}")
     try:
+        # Parse URL to get filename if not provided
         if not filename:
             path = urlparse(url).path
             filename = os.path.basename(path)
             if not filename:
+                # Generate a random name if we couldn't extract one
                 import uuid
                 filename = f"downloaded_{uuid.uuid4().hex[:8]}"
-            print(f"[DEBUG] Generated filename: {filename}")
+            debug_print(f"Generated filename: {filename}")
         
+        # Create temporary file
         temp_dir = tempfile.gettempdir()
         filepath = os.path.join(temp_dir, filename)
-        print(f"[DEBUG] File will be saved to: {filepath}")
+        debug_print(f"Saving to filepath: {filepath}")
         
-        print(f"[DEBUG] Sending HTTP request to: {url}")
+        # Download the file
+        debug_print(f"Starting download request for {url}")
         response = requests.get(url, stream=True)
         response.raise_for_status()
-        print(f"[DEBUG] HTTP request successful, status code: {response.status_code}")
+        debug_print(f"Request status code: {response.status_code}")
         
+        # Save the file
         with open(filepath, 'wb') as f:
-            print(f"[DEBUG] Downloading and writing file content...")
-            chunks_count = 0
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-                chunks_count += 1
-            print(f"[DEBUG] Download complete, wrote {chunks_count} chunks")
         
-        print(f"[DEBUG] File successfully downloaded to {filepath}")
+        debug_print(f"File successfully downloaded to {filepath}")
         return f"File downloaded to {filepath}. You can now process this file."
     except Exception as e:
-        print(f"[DEBUG] Error in download_from_url: {str(e)}")
+        debug_print(f"Error downloading file: {str(e)}")
         return f"Error downloading file: {str(e)}"
 
-@tool
 def extract_text_from_image(image_path: str) -> str:
     """
     Extract text from an image using pytesseract.
+    
     Args:
         image_path: Path to the image file
         
     Returns:
         Extracted text or error message
     """
-    print(f"[DEBUG] extract_text_from_image called with path: {image_path}")
+    debug_print(f"Attempting to extract text from image: {image_path}")
     try:
+        # Try to import pytesseract
         import pytesseract
         from PIL import Image
         
-        print(f"[DEBUG] Opening image from: {image_path}")
-        image = Image.open(image_path)
-        print(f"[DEBUG] Image opened successfully, size: {image.size}, format: {image.format}")
+        debug_print("Successfully imported pytesseract and PIL")
         
-        print(f"[DEBUG] Extracting text using pytesseract...")
+        # Open the image
+        debug_print(f"Opening image file: {image_path}")
+        image = Image.open(image_path)
+        debug_print(f"Image opened: {image.format}, size={image.size}, mode={image.mode}")
+        
+        # Extract text
+        debug_print("Starting OCR text extraction")
         text = pytesseract.image_to_string(image)
-        print(f"[DEBUG] Text extraction completed, extracted {len(text)} characters")
+        debug_print(f"Extracted text length: {len(text)}")
         
         return f"Extracted text from image:\n\n{text}"
-    except ImportError as e:
-        print(f"[DEBUG] ImportError in extract_text_from_image: {str(e)}")
-        return "Error: pytesseract is not installed."
+    except ImportError:
+        debug_print("pytesseract not installed")
+        return "Error: pytesseract is not installed. Please install it with 'pip install pytesseract' and ensure Tesseract OCR is installed on your system."
     except Exception as e:
-        print(f"[DEBUG] Error in extract_text_from_image: {str(e)}")
+        debug_print(f"Error extracting text from image: {str(e)}")
         return f"Error extracting text from image: {str(e)}"
 
-@tool
 def analyze_tabular_file(file_path: str) -> str:
     """
     Analyze a tabular file (CSV or Excel) using pandas.
@@ -138,86 +323,49 @@ def analyze_tabular_file(file_path: str) -> str:
     Returns:
         Analysis result or error message
     """
-    print(f"[DEBUG] analyze_tabular_file called with path: {file_path}")
+    debug_print(f"Attempting to analyze tabular file: {file_path}")
     try:
         import pandas as pd
         import os
         
+        debug_print("Successfully imported pandas")
+        
         _, file_extension = os.path.splitext(file_path)
         file_extension = file_extension.lower()
-        print(f"[DEBUG] File extension detected: {file_extension}")
+        debug_print(f"File extension: {file_extension}")
         
         if file_extension in ['.csv', '.txt']:
-            print(f"[DEBUG] Loading CSV file: {file_path}")
+            debug_print(f"Reading CSV file: {file_path}")
             df = pd.read_csv(file_path)
             file_type = "CSV"
         elif file_extension in ['.xlsx', '.xls', '.xlsm']:
-            print(f"[DEBUG] Loading Excel file: {file_path}")
+            debug_print(f"Reading Excel file: {file_path}")
             df = pd.read_excel(file_path)
             file_type = "Excel"
         else:
-            print(f"[DEBUG] Unsupported file extension: {file_extension}")
+            debug_print(f"Unsupported file extension: {file_extension}")
             return f"Unsupported file extension: {file_extension}. Please provide a CSV or Excel file."
         
-        print(f"[DEBUG] File loaded successfully. Shape: {df.shape}")
+        debug_print(f"File loaded successfully. Shape: {df.shape}")
+        
         result = f"{file_type} file loaded with {len(df)} rows and {len(df.columns)} columns.\n"
         result += f"Columns: {', '.join(df.columns)}\n\n"
         
-        print(f"[DEBUG] Generating summary statistics...")
         result += "Summary statistics:\n"
         result += str(df.describe())
         
         return result
     
     except ImportError as e:
-        print(f"[DEBUG] ImportError in analyze_tabular_file: {str(e)}")
+        debug_print(f"Import error: {str(e)}")
         if "openpyxl" in str(e):
             return "Error: openpyxl is not installed. Please install it with 'pip install openpyxl'."
         else:
             return "Error: pandas is not installed. Please install it with 'pip install pandas'."
     except Exception as e:
-        print(f"[DEBUG] Error in analyze_tabular_file: {str(e)}")
+        debug_print(f"Error analyzing file: {str(e)}")
         return f"Error analyzing file: {str(e)}"
 
-@tool
-@limit_calls(3)  
-def wiki_search(query: str) -> dict:
-    """Search Wikipedia for a query and return maximum 2 results.
-
-    Args:
-        query: The search query.
-    """
-    print(f"[DEBUG] wiki_search called with query: {query}")
-    try:
-        print(f"[DEBUG] Using WikipediaLoader with max_docs=2")
-        search_docs = WikipediaLoader(query=query, load_max_docs=2).load()
-        print(f"[DEBUG] WikipediaLoader returned {len(search_docs)} documents")
-        
-        results = []
-        for i, doc in enumerate(search_docs):
-            title = doc.metadata.get("title", "")
-            source = doc.metadata.get("source", "")
-            page_content = doc.page_content
-            print(f"[DEBUG] Document {i+1}: title='{title}', source='{source}', content length={len(page_content)}")
-            
-            results.append({
-                "title": title,
-                "url": source,
-                "content": page_content
-            })
-        
-        if not results:
-            print(f"[DEBUG] No Wikipedia results found for query: {query}")
-            return {"wiki_results": "No Wikipedia results found for the query: " + query}
-        
-        print(f"[DEBUG] Returning {len(results)} Wikipedia results")
-        return {"wiki_results": results}
-    
-    except Exception as e:
-        print(f"[DEBUG] Error in wiki_search: {str(e)}")
-        return {"wiki_results": f"Error searching Wikipedia: {str(e)}"}
-
-@tool
 def arxiv_search(query: str, max_results: int = 3) -> dict:
     """Search arXiv for academic papers based on a query and return results.
 
@@ -225,30 +373,31 @@ def arxiv_search(query: str, max_results: int = 3) -> dict:
         query: The search query for academic papers.
         max_results: Maximum number of results to return (default: 3).
     """
-    print(f"[DEBUG] arxiv_search called with query: {query}, max_results: {max_results}")
+    debug_print(f"Searching arXiv for: {query}, max_results={max_results}")
     try:
         import arxiv
         
-        print(f"[DEBUG] Creating arxiv Client with page_size={max_results}")
+        debug_print("Successfully imported arxiv package")
+        
         client = arxiv.Client(
             page_size=max_results,
             delay_seconds=3,  
             num_retries=3
         )
         
-        print(f"[DEBUG] Creating arxiv Search for query: {query}")
+        debug_print(f"Created arXiv client with page_size={max_results}")
+        
         search = arxiv.Search(
             query=query,
             max_results=max_results,
             sort_by=arxiv.SortCriterion.Relevance
         )
         
+        debug_print("Executing arXiv search")
+        
         results = []
-        print(f"[DEBUG] Fetching search results...")
-        result_count = 0
-        for paper in client.results(search):
-            result_count += 1
-            print(f"[DEBUG] Processing paper {result_count}: {paper.title}")
+        for i, paper in enumerate(client.results(search)):
+            debug_print(f"Processing arXiv result {i+1}: {paper.title}")
             paper_info = {
                 "title": paper.title,
                 "authors": [author.name for author in paper.authors],
@@ -260,391 +409,306 @@ def arxiv_search(query: str, max_results: int = 3) -> dict:
             }
             results.append(paper_info)
         
+        debug_print(f"Found {len(results)} arXiv papers")
+        
         if not results:
-            print(f"[DEBUG] No arXiv papers found for query: {query}")
             return {"arxiv_results": "No arXiv papers found for the query: " + query}
         
-        print(f"[DEBUG] Returning {len(results)} arXiv results")
         return {"arxiv_results": results}
     
-    except ImportError as e:
-        print(f"[DEBUG] ImportError in arxiv_search: {str(e)}")
+    except ImportError:
+        debug_print("arXiv package not installed")
         return {"arxiv_results": "Error: The arxiv package is not installed. Install it with 'pip install arxiv'."}
     except Exception as e:
-        print(f"[DEBUG] Error in arxiv_search: {str(e)}")
+        debug_print(f"Error searching arXiv: {str(e)}")
         return {"arxiv_results": f"Error searching arXiv: {str(e)}"}
 
-@tool
-@limit_calls(5)  
-def web_search(query: str) -> dict:
-    """Search Serper API for a query and return results.
-
-    Args:
-        query: The search query.
-    """
-    print(f"[DEBUG] web_search called with query: {query}")
+def analyze_video(url: str) -> str:
+    """Analyze video content using Gemini's video understanding capabilities."""
+    debug_print(f"Attempting to analyze video from URL: {url}")
     try:
-        # Get Serper API key from environment variables
-        serper_api_key = os.getenv("SERPER_API_KEY")
-        if not serper_api_key:
-            print(f"[DEBUG] SERPER_API_KEY not found in environment variables")
-            return {"web_results": "Error: SERPER_API_KEY not found in environment variables"}
+        # Validate URL
+        parsed_url = urlparse(url)
+        if not all([parsed_url.scheme, parsed_url.netloc]):
+            debug_print(f"Invalid URL format: {url}")
+            return "Please provide a valid video URL with http:// or https:// prefix."
         
-        # Add rate limiting
-        global _last_web_call
-        elapsed = time.time() - _last_web_call
-        if elapsed < _min_interval:
-            sleep_time = _min_interval - elapsed
-            print(f"[DEBUG] Rate limiting - sleeping for {sleep_time:.2f}s")
-            time.sleep(sleep_time)
-        
-        # Execute the search with retries
-        for attempt in range(_web_retries):
-            try:
-                print(f"[DEBUG] Serper search attempt {attempt+1}/{_web_retries}")
-                
-                # Make request to Serper API
-                headers = {
-                    'X-API-KEY': serper_api_key,
-                    'Content-Type': 'application/json'
-                }
-                payload = json.dumps({
-                    "q": query,
-                    "num": 5  # Number of results to return
-                })
-                
-                response = requests.post('https://google.serper.dev/search', 
-                                       headers=headers, 
-                                       data=payload)
-                response.raise_for_status()  # Raise exception for HTTP errors
-                
-                search_results = response.json()
-                _last_web_call = time.time()
-                print(f"[DEBUG] Search successful, updating last_web_call to {_last_web_call}")
-                
-                # Format the results in a readable way
-                formatted_results = format_serper_results(search_results)
-                
-                if not formatted_results:
-                    return {"web_results": "No search results found."}
+        # Check if it's a YouTube URL
+        if 'youtube.com' not in url and 'youtu.be' not in url:
+            debug_print(f"Not a YouTube URL: {url}")
+            return "Only YouTube videos are supported at this time."
+
+        try:
+            # Configure yt-dlp with minimal extraction
+            import yt_dlp
+            debug_print("Successfully imported yt-dlp")
+            
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'no_playlist': True,
+                'youtube_include_dash_manifest': False
+            }
+
+            debug_print(f"yt-dlp options: {ydl_opts}")
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    # Try basic info extraction
+                    debug_print(f"Extracting info for {url}")
+                    info = ydl.extract_info(url, download=False, process=False)
+                    if not info:
+                        debug_print("Could not extract video information")
+                        return "Could not extract video information."
+
+                    title = info.get('title', 'Unknown')
+                    description = info.get('description', '')
                     
-                return {"web_results": formatted_results}
-                
-            except requests.exceptions.RequestException as e:
-                msg = str(e)
-                print(f"[DEBUG] Search attempt {attempt+1} failed with error: {msg}")
-                if "429" in msg and attempt < _web_retries - 1:  # 429 is the status code for rate limiting
-                    backoff = (2 ** attempt) * _min_interval
-                    print(f"[DEBUG] Rate limit hit, backing off for {backoff:.2f}s")
-                    time.sleep(backoff)
-                    continue
-                
-                # Final failure
-                if attempt == _web_retries - 1:
-                    print(f"[DEBUG] All attempts failed, returning error message")
-                    return {"web_results": f"Search failed after {attempt+1} attempts: {msg}"}
-                
+                    debug_print(f"Video title: {title}")
+                    debug_print(f"Description length: {len(description) if description else 0}")
+                    
+                    # Create results summary
+                    result = f"YouTube Video Analysis:\n"
+                    result += f"Title: {title}\n"
+                    result += f"URL: {url}\n"
+                    if description:
+                        result += f"Description: {description}\n"
+                    
+                    return result
+
+                except Exception as e:
+                    debug_print(f"Error in yt-dlp extraction: {str(e)}")
+                    if 'Sign in to confirm' in str(e):
+                        return "This video requires age verification or sign-in. Please provide a different video URL."
+                    return f"Error accessing video: {str(e)}"
+
+        except ImportError:
+            debug_print("yt-dlp not installed")
+            return "Error: yt-dlp is not installed. Please install it with 'pip install yt-dlp'."
+        except Exception as e:
+            debug_print(f"Error with yt-dlp: {str(e)}")
+            return f"Error extracting video info: {str(e)}"
+
     except Exception as e:
-        print(f"[DEBUG] Error in web_search: {str(e)}")
-        return {"web_results": f"Search error: {str(e)}"}
+        debug_print(f"Error analyzing video: {str(e)}")
+        return f"Error analyzing video: {str(e)}"
 
-def format_serper_results(results):
-    """Format Serper API results into a readable string."""
-    formatted = ""
-    
-    # Process organic results
-    if "organic" in results:
-        for i, result in enumerate(results["organic"]):
-            title = result.get("title", "No Title")
-            link = result.get("link", "")
-            snippet = result.get("snippet", "")
-            
-            formatted += f"{i+1}. {title}\n"
-            formatted += f"   URL: {link}\n"
-            formatted += f"   {snippet}\n\n"
-    
-    # Process knowledge graph if present
-    if "knowledgeGraph" in results:
-        kg = results["knowledgeGraph"]
-        title = kg.get("title", "")
-        description = kg.get("description", "")
-        if title:
-            formatted += f"Knowledge Graph: {title}\n"
-            if description:
-                formatted += f"{description}\n\n"
-    
-    # Process related searches if present
-    if "relatedSearches" in results and results["relatedSearches"]:
-        formatted += "Related Searches:\n"
-        for i, related in enumerate(results["relatedSearches"][:5]):  # Limit to 5 related searches
-            formatted += f"- {related.get('query', '')}\n"
-    
-    return formatted.strip()
-
-def get_llm(provider: str = "google"):
-    """Get language model based on provider"""
-    print(f"[DEBUG] get_llm called with provider: {provider}")
-    if provider == "google":
-        try:
-            print(f"[DEBUG] Attempting to initialize Google's Gemini model")
-            api_key = os.getenv("GOOGLE_API_KEY")
-            print(f"[DEBUG] API key present: {bool(api_key)}")
-            model = LiteLLMModel(
-                model_id="gemini/gemini-2.0-flash",
-                api_key=api_key
-            )
-            print(f"[DEBUG] Google Gemini model initialized successfully")
-            return model
-        except ImportError as e:
-            print(f"[DEBUG] ImportError initializing Google model: {e}")
-            print("litellm not available. Using HfApiModel instead.")
-            from smolagents import HfApiModel
-            print(f"[DEBUG] Falling back to HfApiModel")
-            return HfApiModel()
-        except Exception as e:
-            print(f"[DEBUG] Error initializing Google model: {e}")
-            print("Falling back to HfApiModel")
-            from smolagents import HfApiModel
-            print(f"[DEBUG] Falling back to HfApiModel")
-            return HfApiModel()
-    elif provider == "huggingface":
-        try:
-            print(f"[DEBUG] Initializing HuggingFace model")
-            from smolagents import HfApiModel
-            model = HfApiModel()
-            print(f"[DEBUG] HuggingFace model initialized successfully")
-            return model
-        except ImportError as e:
-            print(f"[DEBUG] ImportError initializing HuggingFace model: {e}")
-            print("HfApiModel not available.")
-            raise ImportError("No suitable model found")
-    elif provider == "groq":
-        try:
-            print(f"[DEBUG] Initializing Groq model")
-            api_key = os.getenv("GROQ_API_KEY")
-            print(f"[DEBUG] API key present: {bool(api_key)}")
-            model = LiteLLMModel(
-                model_id="groq/qwen-qwq-32b",
-                api_key=api_key,
-                api_base="https://api.groq.com/openai/v1"
-            )
-            print(f"[DEBUG] Groq model initialized successfully")
-            return model
-        except Exception as e:
-            print(f"[DEBUG] Error initializing Groq model: {e}")
-            print("Falling back to HfApiModel")
-            from smolagents import HfApiModel
-            print(f"[DEBUG] Falling back to HfApiModel")
-            return HfApiModel()
-    else:
-        print(f"[DEBUG] Invalid provider: {provider}")
-        raise ValueError("Invalid provider. Choose 'google', 'huggingface', or 'groq'.")
-
-_provider_state = {
-    "providers": ["google", "groq", "huggingface"],
-    "current_index": 0,
-    "last_used": {"google": 0, "groq": 0, "huggingface": 0},
-    "cooldown_periods": {"google": 60, "groq": 60, "huggingface": 30},
-    "agent_instances": {}  # Cache for created agents
-}
-
-def run_with_provider_juggling(agent, question):
-    """Run an agent with automatic provider juggling on rate limit errors"""
-    global _provider_state
-    max_attempts = 3
-    current_provider = getattr(agent, "provider", "google")  # Default to google if not set
-    
-    for attempt in range(max_attempts):
-        try:
-            # Reset tool counters if possible
-            try:
-                for tool in agent.tools:
-                    if hasattr(tool, "__wrapped__") and hasattr(tool.__wrapped__, "__closure__"):
-                        if tool.__name__ == "wiki_search" or tool.__name__ == "web_search":
-                            tool.__wrapped__.__closure__[0].cell_contents['count'] = 0
-            except (AttributeError, IndexError) as e:
-                print(f"[DEBUG] Could not reset tool counters: {e}")
-            
-            # Run with current provider
-            return agent.run(question)
-            
-        except Exception as e:
-            error_message = str(e)
-            print(f"[DEBUG] Error with provider {current_provider}: {error_message}")
-            
-            # Check if it's a rate limit error
-            if any(term in error_message.lower() for term in ["rate_limit", "quota", "resource_exhausted"]):
-                print(f"[DEBUG] Rate limit detected for {current_provider}")
-                
-                # Mark as rate limited with extended cooldown
-                _provider_state["last_used"][current_provider] = time.time() + 2 * _provider_state["cooldown_periods"][current_provider]
-                
-                # If this is not our last attempt, try another provider
-                if attempt < max_attempts - 1:
-                    # Get next provider
-                    current_provider = get_next_available_provider(question)
-                    print(f"[DEBUG] Switching to provider: {current_provider}")
-                    
-                    # Get or create agent for new provider
-                    if current_provider in _provider_state["agent_instances"]:
-                        agent = _provider_state["agent_instances"][current_provider]
-                    else:
-                        # Create new agent with this provider
-                        agent = create_agent_with_provider(current_provider)
-                        _provider_state["agent_instances"][current_provider] = agent
-                    
-                    # Small delay before retry
-                    time.sleep(2)
-                    continue
-            
-            # For non-rate-limit errors or if we're out of attempts, re-raise
-            raise e
-    
-    # Should not get here due to raise in the loop
-    raise RuntimeError("Failed after all provider attempts")
-
-def get_next_available_provider(question=None):
-    """Get the next available provider, considering cooldowns and content type"""
-    global _provider_state
-    current_time = time.time()
-    
-    # Prioritize Google for YouTube questions
-    if question and ("youtube.com" in question or "youtu.be" in question):
-        if current_time - _provider_state["last_used"]["google"] >= _provider_state["cooldown_periods"]["google"]:
-            print(f"[DEBUG] YouTube content detected, using Google provider")
-            _provider_state["last_used"]["google"] = current_time
-            return "google"
-    
-    # Try each provider in rotation
-    for _ in range(len(_provider_state["providers"])):
-        _provider_state["current_index"] = (_provider_state["current_index"] + 1) % len(_provider_state["providers"])
-        provider = _provider_state["providers"][_provider_state["current_index"]]
+class GeminiAgent:
+    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash"):
+        debug_print(f"Initializing GeminiAgent with model: {model_name}")
+        # Suppress warnings
+        import warnings
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", message=".*will be deprecated.*")
+        warnings.filterwarnings("ignore", "LangChain.*")
         
-        if current_time - _provider_state["last_used"][provider] >= _provider_state["cooldown_periods"][provider]:
-            _provider_state["last_used"][provider] = current_time
-            return provider
-    
-    # If all are on cooldown, pick the one with longest elapsed time
-    provider = max(_provider_state["providers"], key=lambda p: current_time - _provider_state["last_used"][p])
-    _provider_state["last_used"][provider] = current_time
-    return provider
+        self.api_key = api_key
+        self.model_name = model_name
+        
+        # Configure Gemini
+        debug_print("Configuring Gemini API")
+        genai.configure(api_key=api_key)
+        
+        # Initialize the LLM
+        debug_print("Setting up LLM")
+        self.llm = self._setup_llm()
+        
+        # Setup tools
+        debug_print("Setting up tools")
+        self.tools = self._setup_tools()
+        
+        # Setup memory
+        debug_print("Setting up conversation memory")
+        self.memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True
+        )
+        
+        # Initialize agent
+        debug_print("Setting up agent")
+        self.agent = self._setup_agent()
+        debug_print("GeminiAgent initialization complete")
 
-def create_agent_with_provider(provider):
-    """Create agent with specific provider and monkey patch its run method"""
-    # Get the model for this provider
-    model = get_llm(provider)
-    
-    # Set up tools 
-    tools = [
-        wiki_search,
-        arxiv_search,
-        web_search,
-        download_from_url,
-        analyze_tabular_file,
-        extract_text_from_image,
-        PythonInterpreterTool()
-    ]
-    
-    # Create agent
-    agent = ToolCallingAgent(tools=tools, model=model)
-    agent.system_prompt = system_prompt
-    
-    # Store provider info on agent
-    agent.provider = provider
-    
-    # Monkey patch the run method to use our provider juggling
-    def patched_run(question):
-        return run_with_provider_juggling(agent, question)
-    
-    agent.run = patched_run
-    return agent
+    def run(self, query: str) -> str:
+        """Run the agent on a query with incremental retries."""
+        debug_print(f"Running agent with query: {query}")
+        max_retries = 3
+        base_sleep = 1  # Start with 1 second sleep
+        
+        for attempt in range(max_retries):
+            try:
+                debug_print(f"Attempt {attempt + 1}/{max_retries}")
+                response = self.agent.run(query)
+                debug_print(f"Agent response received (length: {len(response)})")
+                return response
 
-def create_agent(provider: str = "google") -> ToolCallingAgent:
+            except Exception as e:
+                debug_print(f"Error in attempt {attempt + 1}: {str(e)}")
+                sleep_time = base_sleep * (attempt + 1)  # Incremental sleep: 1s, 2s, 3s
+                if attempt < max_retries - 1:
+                    debug_print(f"Retrying in {sleep_time} seconds...")
+                    print(f"Attempt {attempt + 1} failed. Retrying in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                    continue
+                debug_print(f"All {max_retries} attempts failed")
+                return f"Error processing query after {max_retries} attempts: {str(e)}"
+
+    def _setup_llm(self):
+        """Set up the language model."""
+        debug_print(f"Setting up {self.model_name} LLM")
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=self.model_name,
+                google_api_key=self.api_key,
+                temperature=0,
+                max_output_tokens=2000,
+                convert_system_message_to_human=True,
+                system=system_prompt
+            )
+            debug_print("LLM setup successful")
+            return llm
+        except Exception as e:
+            debug_print(f"Error setting up LLM: {str(e)}")
+            raise
+        
+    def _setup_tools(self):
+        """Set up the tools for the agent."""
+        debug_print("Setting up agent tools")
+        
+        # Create instances of class-based tools
+        wiki_search_tool = WikiSearchTool()
+        web_search_tool = WebSearchTool()
+        
+        tools = [
+            Tool(
+                name=wiki_search_tool.name,
+                func=wiki_search_tool,
+                description=wiki_search_tool.description
+            ),
+            Tool(
+                name=web_search_tool.name,
+                func=web_search_tool,
+                description=web_search_tool.description
+            ),
+            Tool(
+                name="arxiv_search",
+                func=arxiv_search,
+                description="Search arXiv for academic papers based on a query and return results."
+            ),
+            Tool(
+                name="download_from_url",
+                func=download_from_url,
+                description="Download a file from a URL"
+            ),
+            Tool(
+                name="extract_text_from_image",
+                func=extract_text_from_image,
+                description="Extract text from an image"
+            ),
+            Tool(
+                name="analyze_tabular_file",
+                func=analyze_tabular_file,
+                description="Analyze a tabular file (CSV or Excel)"
+            ),
+            Tool(
+                name="analyze_video",
+                func=analyze_video,
+                description="Analyze YouTube video content"
+            ),
+        ]
+        debug_print(f"Set up {len(tools)} tools")
+        return tools
+        
+    def _setup_agent(self) -> AgentExecutor:
+        """Set up the agent with tools and system message."""
+        debug_print("Setting up agent executor")
+        try:
+            # Initialize agent executor with no prefix/suffix/safety settings
+            agent = initialize_agent(
+                agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
+                tools=self.tools,
+                llm=self.llm,
+                verbose=True,
+                memory=self.memory,
+                max_iterations=5,
+                handle_parsing_errors=True,
+                return_only_outputs=True
+            )
+            debug_print("Agent executor setup successful")
+            return agent
+        except Exception as e:
+            debug_print(f"Error setting up agent: {str(e)}")
+            raise
+
+def create_agent(provider: str = "google") -> GeminiAgent:
     """
-    Create or return an agent with automatic provider juggling capabilities.
-    This function remains unchanged in its signature, but now handles rate limits internally.
+    Create an agent using the specified provider.
+    Currently only supports Google's Gemini.
+    
+    Args:
+        provider: The provider to use (only "google" is supported)
+        
+    Returns:
+        A GeminiAgent instance
     """
-    global _provider_state
+    debug_print(f"Creating agent with provider: {provider}")
+    if provider.lower() != "google":
+        debug_print(f"Provider {provider} not supported, defaulting to Google Gemini")
+        print(f"Warning: Provider {provider} not supported. Using Google Gemini.")
     
-    # Select the best initial provider
-    if provider not in _provider_state["providers"]:
-        provider = "google"  # Default to google for unknown providers
+    # Get the API key from environment variables
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        debug_print("GOOGLE_API_KEY not found in environment variables")
+        raise ValueError("GOOGLE_API_KEY not found in environment variables")
     
-    # Use cached agent if available
-    if provider in _provider_state["agent_instances"]:
-        print(f"[DEBUG] Using cached agent for provider: {provider}")
-        return _provider_state["agent_instances"][provider]
-    
-    # Create a new agent with the selected provider
-    print(f"[DEBUG] Creating new agent with provider: {provider}")
-    agent = create_agent_with_provider(provider)
-    
-    # Cache the agent for future use
-    _provider_state["agent_instances"][provider] = agent
-    
-    return agent
-
-def check_search_results(response: str) -> bool:
-    """Check if any search results were found in the response"""
-    print(f"[DEBUG] check_search_results called for response of length: {len(response)}")
-    search_indicators = [
-        "wiki_results", 
-        "arxiv_results", 
-        "web_results",
-        "From Wikipedia",
-        "From arXiv",
-        "From DuckDuckGo"
-    ]
-    
-    for indicator in search_indicators:
-        if indicator in response:
-            print(f"[DEBUG] Search indicator found: '{indicator}'")
-            return True
-    print(f"[DEBUG] No search indicators found in response")
-    return False
-
+    debug_print("API key found, creating GeminiAgent")
+    # Create and return the agent
+    return GeminiAgent(api_key=api_key)
 
 if __name__ == "__main__":
-    print(f"[DEBUG] Starting main execution")
-    print(f"[DEBUG] Creating agent with Google provider")
-    agent = create_agent("groq")
-    print("Agent created. Type 'exit' to quit.")
-    
-    while True:
-        print(f"[DEBUG] Waiting for user input")
-        query = input("\nYour question: ")
-        print(f"[DEBUG] Received query: '{query}'")
+    debug_print("Script started as main")
+    print("Creating agent with Google provider")
+    try:
+        agent = create_agent("google")
+        print("Agent created. Type 'exit' to quit.")
+        debug_print("Agent created successfully")
         
-        if query.lower() in ("exit", "quit"):
-            print(f"[DEBUG] Exit command detected, terminating")
-            break
-        
-        try:
-            # Reset the limit_calls counters for each new question
-            # This requires modifying the limit_calls decorator to expose a reset method
-            wiki_search.__wrapped__.__closure__[0].cell_contents['count'] = 0
-            web_search.__wrapped__.__closure__[0].cell_contents['count'] = 0
+        while True:
+            query = input("\nYour question: ")
+            debug_print(f"User input: {query}")
             
-            print("\n[Searching and generating answer...]")
-            print(f"[DEBUG] Running agent with query: '{query}'")
+            if query.lower() in ("exit", "quit"):
+                debug_print("User requested exit")
+                print("Goodbye!")
+                break
             
-            start_time = time.time()
-            resp = agent.run(query)
-            end_time = time.time()
-            print(f"[DEBUG] Agent run completed in {end_time - start_time:.2f} seconds")
-            print(f"[DEBUG] Response length: {len(resp)}")
-            
-            print(f"\nResponse: {resp}")
+            try:
+                print("\n[Searching and generating answer...]")
                 
-        except RuntimeError as e:
-            if "Call limit reached" in str(e):
-                print(f"[DEBUG] Search limit reached: {str(e)}")
-                print("\n[Note]: Search limit reached. Moving on with partial results.")
-                # Optionally, you could have the agent provide a response with what it found so far
-            else:
-                print(f"[DEBUG] RuntimeError: {str(e)}")
-                print(f"\n[Error]: {str(e)}")
-        except Exception as e:
-            print(f"[DEBUG] Exception in agent.run: {type(e).__name__}: {str(e)}")
-            print(f"\n[Error]: An unexpected error occurred: {str(e)}")
-            print("Please try again or check your configuration.")
+                start_time = time.time()
+                debug_print(f"Starting agent run at {start_time}")
+                resp = agent.run(query)
+                end_time = time.time()
+                elapsed = end_time - start_time
+                debug_print(f"Agent run completed in {elapsed:.2f} seconds")
+                print(f"Response generated in {elapsed:.2f} seconds")
+                
+                print(f"\nResponse: {resp}")
+                    
+            except RuntimeError as e:
+                debug_print(f"RuntimeError: {str(e)}")
+                if "Call limit reached" in str(e):
+                    print("\n[Note]: Search limit reached. Moving on with partial results.")
+                else:
+                    print(f"\n[Error]: {str(e)}")
+            except Exception as e:
+                debug_print(f"Unexpected error: {str(e)}")
+                print(f"\n[Error]: An unexpected error occurred: {str(e)}")
+                print("Please try again or check your configuration.")
+    except Exception as e:
+        debug_print(f"Error during agent creation: {str(e)}")
+        print(f"Failed to create agent: {str(e)}")
+        print("Please try again or check your configuration.")
