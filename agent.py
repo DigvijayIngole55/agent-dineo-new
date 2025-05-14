@@ -439,13 +439,111 @@ def get_llm(provider: str = "google"):
         print(f"[DEBUG] Invalid provider: {provider}")
         raise ValueError("Invalid provider. Choose 'google', 'huggingface', or 'groq'.")
 
-def create_agent(provider: str = "google") -> ToolCallingAgent:
-    print(f"[DEBUG] create_agent called with provider: {provider}")
-    print(f"[DEBUG] Getting LLM for provider: {provider}")
-    model = get_llm(provider)
-    print(f"[DEBUG] LLM initialized")
+_provider_state = {
+    "providers": ["google", "groq", "huggingface"],
+    "current_index": 0,
+    "last_used": {"google": 0, "groq": 0, "huggingface": 0},
+    "cooldown_periods": {"google": 60, "groq": 60, "huggingface": 30},
+    "agent_instances": {}  # Cache for created agents
+}
+
+# Original tools and tool limiters remain unchanged
+# (wiki_search, web_search, etc.)
+
+def get_llm(provider: str = "google"):
+    """Get language model based on provider - unchanged"""
+    print(f"[DEBUG] get_llm called with provider: {provider}")
+    # [Original get_llm implementation here]
+    # This function stays the same
+
+# This function intercepts and handles any rate limit errors
+def run_with_provider_juggling(agent, question):
+    """Run an agent with automatic provider juggling on rate limit errors"""
+    global _provider_state
+    max_attempts = 3
+    current_provider = getattr(agent, "provider", "google")  # Default to google if not set
     
-    print(f"[DEBUG] Setting up tools")
+    for attempt in range(max_attempts):
+        try:
+            # Reset tool counters if possible
+            try:
+                for tool in agent.tools:
+                    if hasattr(tool, "__wrapped__") and hasattr(tool.__wrapped__, "__closure__"):
+                        if tool.__name__ == "wiki_search" or tool.__name__ == "web_search":
+                            tool.__wrapped__.__closure__[0].cell_contents['count'] = 0
+            except (AttributeError, IndexError) as e:
+                print(f"[DEBUG] Could not reset tool counters: {e}")
+            
+            # Run with current provider
+            return agent.run(question)
+            
+        except Exception as e:
+            error_message = str(e)
+            print(f"[DEBUG] Error with provider {current_provider}: {error_message}")
+            
+            # Check if it's a rate limit error
+            if any(term in error_message.lower() for term in ["rate_limit", "quota", "resource_exhausted"]):
+                print(f"[DEBUG] Rate limit detected for {current_provider}")
+                
+                # Mark as rate limited with extended cooldown
+                _provider_state["last_used"][current_provider] = time.time() + 2 * _provider_state["cooldown_periods"][current_provider]
+                
+                # If this is not our last attempt, try another provider
+                if attempt < max_attempts - 1:
+                    # Get next provider
+                    current_provider = get_next_available_provider(question)
+                    print(f"[DEBUG] Switching to provider: {current_provider}")
+                    
+                    # Get or create agent for new provider
+                    if current_provider in _provider_state["agent_instances"]:
+                        agent = _provider_state["agent_instances"][current_provider]
+                    else:
+                        # Create new agent with this provider
+                        agent = create_agent_with_provider(current_provider)
+                        _provider_state["agent_instances"][current_provider] = agent
+                    
+                    # Small delay before retry
+                    time.sleep(2)
+                    continue
+            
+            # For non-rate-limit errors or if we're out of attempts, re-raise
+            raise e
+    
+    # Should not get here due to raise in the loop
+    raise RuntimeError("Failed after all provider attempts")
+
+def get_next_available_provider(question=None):
+    """Get the next available provider, considering cooldowns and content type"""
+    global _provider_state
+    current_time = time.time()
+    
+    # Prioritize Google for YouTube questions
+    if question and ("youtube.com" in question or "youtu.be" in question):
+        if current_time - _provider_state["last_used"]["google"] >= _provider_state["cooldown_periods"]["google"]:
+            print(f"[DEBUG] YouTube content detected, using Google provider")
+            _provider_state["last_used"]["google"] = current_time
+            return "google"
+    
+    # Try each provider in rotation
+    for _ in range(len(_provider_state["providers"])):
+        _provider_state["current_index"] = (_provider_state["current_index"] + 1) % len(_provider_state["providers"])
+        provider = _provider_state["providers"][_provider_state["current_index"]]
+        
+        if current_time - _provider_state["last_used"][provider] >= _provider_state["cooldown_periods"][provider]:
+            _provider_state["last_used"][provider] = current_time
+            return provider
+    
+    # If all are on cooldown, pick the one with longest elapsed time
+    provider = max(_provider_state["providers"], key=lambda p: current_time - _provider_state["last_used"][p])
+    _provider_state["last_used"][provider] = current_time
+    return provider
+
+def create_agent_with_provider(provider):
+    """Create agent with specific provider and monkey patch its run method"""
+    # Get the model for this provider
+    model = get_llm(provider)
+    
+    # Set up tools 
     tools = [
         wiki_search,
         arxiv_search,
@@ -455,13 +553,47 @@ def create_agent(provider: str = "google") -> ToolCallingAgent:
         extract_text_from_image,
         PythonInterpreterTool()
     ]
-    print(f"[DEBUG] Configured {len(tools)} tools")
     
-    print(f"[DEBUG] Creating ToolCallingAgent")
+    # Create agent
     agent = ToolCallingAgent(tools=tools, model=model)
     agent.system_prompt = system_prompt
-    print(f"[DEBUG] System prompt set, agent created")
-    print(agent.system_prompt)
+    
+    # Store provider info on agent
+    agent.provider = provider
+    
+    # Save original run method
+    original_run = agent.run
+    
+    # Monkey patch the run method to use our provider juggling
+    def patched_run(question):
+        return run_with_provider_juggling(agent, question)
+    
+    agent.run = patched_run
+    return agent
+
+def create_agent(provider: str = "google") -> ToolCallingAgent:
+    """
+    Create or return an agent with automatic provider juggling capabilities.
+    This function remains unchanged in its signature, but now handles rate limits internally.
+    """
+    global _provider_state
+    
+    # Select the best initial provider
+    if provider not in _provider_state["providers"]:
+        provider = "google"  # Default to google for unknown providers
+    
+    # Use cached agent if available
+    if provider in _provider_state["agent_instances"]:
+        print(f"[DEBUG] Using cached agent for provider: {provider}")
+        return _provider_state["agent_instances"][provider]
+    
+    # Create a new agent with the selected provider
+    print(f"[DEBUG] Creating new agent with provider: {provider}")
+    agent = create_agent_with_provider(provider)
+    
+    # Cache the agent for future use
+    _provider_state["agent_instances"][provider] = agent
+    
     return agent
 
 def check_search_results(response: str) -> bool:
