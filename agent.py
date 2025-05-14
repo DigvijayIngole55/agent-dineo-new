@@ -423,7 +423,7 @@ def get_llm(provider: str = "google"):
             api_key = os.getenv("GROQ_API_KEY")
             print(f"[DEBUG] API key present: {bool(api_key)}")
             model = LiteLLMModel(
-                model_id="groq/llama3-70b-8192",
+                model_id="groq/qwen-qwq-32b",
                 api_key=api_key,
                 api_base="https://api.groq.com/openai/v1"
             )
