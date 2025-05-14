@@ -365,6 +365,125 @@ def analyze_tabular_file(file_path: str) -> str:
     except Exception as e:
         debug_print(f"Error analyzing file: {str(e)}")
         return f"Error analyzing file: {str(e)}"
+    
+def save_and_read_file(content: str, filename: Optional[str] = None) -> str:
+    """
+    Save content to a temporary file and return the path.
+    Useful for processing files from the GAIA API.
+    
+    Args:
+        content: The content to save to the file
+        filename: Optional filename, will generate a random name if not provided
+        
+    Returns:
+        Path to the saved file
+    """
+    temp_dir = tempfile.gettempdir()
+    if filename is None:
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        filepath = temp_file.name
+    else:
+        filepath = os.path.join(temp_dir, filename)
+    
+    # Write content to the file
+    with open(filepath, 'w') as f:
+        f.write(content)
+    
+    return f"File saved to {filepath}. You can read this file to process its contents."
+
+def open_and_read_file(file_path: str) -> str:
+    """
+    Open and read the contents of a file.
+    
+    Args:
+        file_path: Path to the file to be read
+        
+    Returns:
+        File contents as a string or error message
+    """
+    debug_print(f"Attempting to open and read file: {file_path}")
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            content = file.read()
+        debug_print(f"Successfully read file, content length: {len(content)}")
+        return content
+    except UnicodeDecodeError:
+        debug_print("Unicode decode error, trying binary mode")
+        try:
+            # Try binary mode for non-text files
+            with open(file_path, 'rb') as file:
+                binary_content = file.read()
+            return f"Binary file read successfully. File size: {len(binary_content)} bytes"
+        except Exception as e:
+            debug_print(f"Error reading file in binary mode: {str(e)}")
+            return f"Error reading file in binary mode: {str(e)}"
+    except Exception as e:
+        debug_print(f"Error reading file: {str(e)}")
+        return f"Error reading file: {str(e)}"
+
+
+def analyze_csv_file(file_path: str, query: str) -> str:
+    """
+    Analyze a CSV file using pandas and answer a question about it.
+    
+    Args:
+        file_path: Path to the CSV file
+        query: Question about the data
+        
+    Returns:
+        Analysis result or error message
+    """
+    try:
+        import pandas as pd
+        
+        # Read the CSV file
+        df = pd.read_csv(file_path)
+        
+        # Run various analyses based on the query
+        result = f"CSV file loaded with {len(df)} rows and {len(df.columns)} columns.\n"
+        result += f"Columns: {', '.join(df.columns)}\n\n"
+        
+        # Add summary statistics
+        result += "Summary statistics:\n"
+        result += str(df.describe())
+        
+        return result
+    except ImportError:
+        return "Error: pandas is not installed. Please install it with 'pip install pandas'."
+    except Exception as e:
+        return f"Error analyzing CSV file: {str(e)}"
+
+
+def analyze_excel_file(file_path: str, query: str) -> str:
+    """
+    Analyze an Excel file using pandas and answer a question about it.
+    
+    Args:
+        file_path: Path to the Excel file
+        query: Question about the data
+        
+    Returns:
+        Analysis result or error message
+    """
+    try:
+        import pandas as pd
+        
+        # Read the Excel file
+        df = pd.read_excel(file_path)
+        
+        # Run various analyses based on the query
+        result = f"Excel file loaded with {len(df)} rows and {len(df.columns)} columns.\n"
+        result += f"Columns: {', '.join(df.columns)}\n\n"
+        
+        # Add summary statistics
+        result += "Summary statistics:\n"
+        result += str(df.describe())
+        
+        return result
+    except ImportError:
+        return "Error: pandas and openpyxl are not installed. Please install them with 'pip install pandas openpyxl'."
+    except Exception as e:
+        return f"Error analyzing Excel file: {str(e)}"
 
 def arxiv_search(query: str, max_results: int = 3) -> dict:
     """Search arXiv for academic papers based on a query and return results.
@@ -617,6 +736,26 @@ class GeminiAgent:
                 func=analyze_video,
                 description="Analyze YouTube video content"
             ),
+            Tool(
+            name="open_and_read_file",
+            func=open_and_read_file,
+            description="Open and read the contents of a file"
+        ),
+        Tool(
+            name="save_and_read_file",
+            func=save_and_read_file,
+            description="Save content to a file and return the path"
+        ),
+        Tool(
+            name="analyze_csv_file",
+            func=analyze_csv_file,
+            description="Analyze a CSV file using pandas"
+        ),
+        Tool(
+            name="analyze_excel_file",
+            func=analyze_excel_file,
+            description="Analyze an Excel file using pandas"
+        ),
         ]
         debug_print(f"Set up {len(tools)} tools")
         return tools
