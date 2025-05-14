@@ -16,7 +16,7 @@ class BasicAgent:
     def __init__(self):
         print("Initializing SmolAgent...")
         # Create your agent using the function from agent.py
-        self.agent = create_agent("google")
+        self.agent = create_agent("groq")
         print("SmolAgent initialized successfully")
 
     def __call__(self, question: str) -> str:
