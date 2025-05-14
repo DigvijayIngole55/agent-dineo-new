@@ -273,6 +273,7 @@ def arxiv_search(query: str, max_results: int = 3) -> dict:
     except Exception as e:
         print(f"[DEBUG] Error in arxiv_search: {str(e)}")
         return {"arxiv_results": f"Error searching arXiv: {str(e)}"}
+
 @tool
 @limit_calls(5)  
 def web_search(query: str) -> dict:
@@ -447,16 +448,6 @@ _provider_state = {
     "agent_instances": {}  # Cache for created agents
 }
 
-# Original tools and tool limiters remain unchanged
-# (wiki_search, web_search, etc.)
-
-def get_llm(provider: str = "google"):
-    """Get language model based on provider - unchanged"""
-    print(f"[DEBUG] get_llm called with provider: {provider}")
-    # [Original get_llm implementation here]
-    # This function stays the same
-
-# This function intercepts and handles any rate limit errors
 def run_with_provider_juggling(agent, question):
     """Run an agent with automatic provider juggling on rate limit errors"""
     global _provider_state
@@ -560,9 +551,6 @@ def create_agent_with_provider(provider):
     
     # Store provider info on agent
     agent.provider = provider
-    
-    # Save original run method
-    original_run = agent.run
     
     # Monkey patch the run method to use our provider juggling
     def patched_run(question):
