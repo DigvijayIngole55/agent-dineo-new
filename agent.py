@@ -16,6 +16,11 @@ import tempfile
 import requests
 from bs4 import BeautifulSoup
 
+# Web search rate limiting and retry parameters
+_web_retries = 3
+_min_interval = 1.0  # Minimum time between web search calls in seconds
+_last_web_call = 0   # Last time a web search was made
+
 print("[DEBUG] Loading environment variables...")
 load_dotenv()
 
@@ -267,72 +272,140 @@ def arxiv_search(query: str, max_results: int = 3) -> dict:
     except Exception as e:
         print(f"[DEBUG] Error in arxiv_search: {str(e)}")
         return {"arxiv_results": f"Error searching arXiv: {str(e)}"}
-
-# @tool
-# def web_search(query: str) -> dict:
-#     """Search DuckDuckGo for a query and return results.
-
-#     Args:
-#         query: The search query.
-#     """
-#     search_tool = DuckDuckGoSearchTool()
-#     search_results = search_tool(query)
-    
-#     return {"web_results": search_results}
-
-_last_web_call = 0.0
-_web_retries   = 5
-_min_interval  = 2.0
-
 @tool
 def web_search(query: str) -> dict:
-    """Search DuckDuckGo for a query and return results.
+    """Search the web for a query and return results.
+    Uses DuckDuckGo by default, falls back to Serper API if DuckDuckGo is unavailable.
 
     Args:
         query: The search query.
     """
     print(f"[DEBUG] web_search called with query: {query}")
-    try:
-        # Use DuckDuckGo API wrapper for more reliable results
-        search = DuckDuckGoSearchAPIWrapper(max_results=5)
+    
+    # Add rate limiting
+    global _last_web_call
+    elapsed = time.time() - _last_web_call
+    if elapsed < _min_interval:
+        sleep_time = _min_interval - elapsed
+        print(f"[DEBUG] Rate limiting - sleeping for {sleep_time:.2f}s")
+        time.sleep(sleep_time)
+    
+    # Try DuckDuckGo first
+    ddg_success = False
+    for attempt in range(_web_retries):
+        try:
+            print(f"[DEBUG] DuckDuckGo search attempt {attempt+1}/{_web_retries}")
+            search = DuckDuckGoSearchAPIWrapper(max_results=5)
+            results = search.run(query)
+            _last_web_call = time.time()
+            ddg_success = True
+            print(f"[DEBUG] DuckDuckGo search successful")
+            
+            if not results or results.strip() == "":
+                print(f"[DEBUG] No DuckDuckGo results found")
+                break  # Try Serper instead
+                
+            return {"web_results": f"[Results from DuckDuckGo]\n{results}"}
+            
+        except Exception as e:
+            msg = str(e)
+            print(f"[DEBUG] DuckDuckGo attempt {attempt+1} failed: {msg}")
+            if "rate" in msg.lower() and attempt < _web_retries - 1:
+                backoff = (2 ** attempt) * _min_interval
+                print(f"[DEBUG] DuckDuckGo rate limit hit, backing off for {backoff:.2f}s")
+                time.sleep(backoff)
+                continue
+            
+            # If we've exhausted all retries or it's not a rate limit issue, break to try Serper
+            print(f"[DEBUG] DuckDuckGo search failed after {attempt+1} attempts, trying Serper")
+            break
+    
+    # If DuckDuckGo wasn't successful, try Serper
+    if not ddg_success:
+        print(f"[DEBUG] Falling back to Serper API")
         
-        # Add rate limiting (keeping your existing rate limiting logic)
-        global _last_web_call
-        elapsed = time.time() - _last_web_call
-        if elapsed < _min_interval:
-            sleep_time = _min_interval - elapsed
-            print(f"[DEBUG] Rate limiting - sleeping for {sleep_time:.2f}s")
-            time.sleep(sleep_time)
+        # Get Serper API key
+        serper_api_key = os.getenv("SERPER_API_KEY")
+        if not serper_api_key:
+            print(f"[DEBUG] SERPER_API_KEY not found in environment variables")
+            return {"web_results": "Error: DuckDuckGo unavailable and SERPER_API_KEY not found in environment variables"}
         
-        # Execute the search with retries
+        # Try Serper with retries
         for attempt in range(_web_retries):
             try:
-                print(f"[DEBUG] Search attempt {attempt+1}/{_web_retries}")
-                results = search.run(query)
-                _last_web_call = time.time()
-                print(f"[DEBUG] Search successful, updating last_web_call to {_last_web_call}")
+                print(f"[DEBUG] Serper search attempt {attempt+1}/{_web_retries}")
                 
-                if not results or results.strip() == "":
-                    return {"web_results": "No search results found."}
+                # Make request to Serper API
+                headers = {
+                    'X-API-KEY': serper_api_key,
+                    'Content-Type': 'application/json'
+                }
+                payload = json.dumps({
+                    "q": query,
+                    "num": 5  # Number of results to return
+                })
+                
+                response = requests.post('https://google.serper.dev/search', 
+                                       headers=headers, 
+                                       data=payload)
+                response.raise_for_status()
+                
+                search_results = response.json()
+                _last_web_call = time.time()
+                print(f"[DEBUG] Serper search successful")
+                
+                # Format the results
+                formatted_results = format_serper_results(search_results)
+                
+                if not formatted_results:
+                    return {"web_results": "No search results found from Serper."}
                     
-                return {"web_results": results}
+                return {"web_results": f"[Results from Serper]\n{formatted_results}"}
+                
             except Exception as e:
                 msg = str(e)
-                print(f"[DEBUG] Search attempt {attempt+1} failed with error: {msg}")
-                if "rate" in msg.lower() and attempt < _web_retries - 1:
+                print(f"[DEBUG] Serper attempt {attempt+1} failed: {msg}")
+                if "429" in msg and attempt < _web_retries - 1:
                     backoff = (2 ** attempt) * _min_interval
-                    print(f"[DEBUG] Rate limit hit, backing off for {backoff:.2f}s")
+                    print(f"[DEBUG] Serper rate limit hit, backing off for {backoff:.2f}s")
                     time.sleep(backoff)
                     continue
                 
-                # Final failure
+                # Final failure after all retries
                 if attempt == _web_retries - 1:
-                    print(f"[DEBUG] All attempts failed, returning error message")
-                    return {"web_results": f"Search failed after {attempt+1} attempts: {msg}"}
-                
-    except Exception as e:
-        print(f"[DEBUG] Error in web_search: {str(e)}")
-        return {"web_results": f"Search error: {str(e)}"}
+                    print(f"[DEBUG] All search attempts failed")
+                    return {"web_results": f"Search failed: DuckDuckGo unavailable and Serper failed after {attempt+1} attempts: {msg}"}
+    
+    # This should not be reached if everything works properly
+    return {"web_results": "Search failed: No results from either DuckDuckGo or Serper."}
+
+def format_serper_results(results):
+    """Format Serper API results into a readable string."""
+    formatted = ""
+    
+    # Process organic results
+    if "organic" in results:
+        for i, result in enumerate(results["organic"]):
+            title = result.get("title", "No Title")
+            link = result.get("link", "")
+            snippet = result.get("snippet", "")
+            
+            formatted += f"{i+1}. {title}\n"
+            formatted += f"   URL: {link}\n"
+            formatted += f"   {snippet}\n\n"
+    
+    # Process knowledge graph if present
+    if "knowledgeGraph" in results:
+        kg = results["knowledgeGraph"]
+        title = kg.get("title", "")
+        description = kg.get("description", "")
+        if title:
+            formatted += f"Knowledge Graph: {title}\n"
+            if description:
+                formatted += f"{description}\n\n"
+    
+    return formatted.strip()
+
 def get_llm(provider: str = "google"):
     """Get language model based on provider"""
     print(f"[DEBUG] get_llm called with provider: {provider}")
