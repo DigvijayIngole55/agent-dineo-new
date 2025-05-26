@@ -1,411 +1,198 @@
 import os
-import time
-import random
-from typing import Optional
 from dotenv import load_dotenv
-
-from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import START, StateGraph, MessagesState
+from langgraph.prebuilt import tools_condition
+from langgraph.prebuilt import ToolNode
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import Tool, AgentExecutor, initialize_agent, AgentType
-from langchain.memory import ConversationBufferMemory
-from langchain.tools import BaseTool
-import google.generativeai as genai
+from langchain_openai import ChatOpenAI
+from langchain.agents import initialize_agent, Tool
+from langchain_groq import ChatGroq
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFaceEmbeddings
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_community.document_loaders import WikipediaLoader
+from langchain_community.document_loaders import ArxivLoader
+from langchain_community.vectorstores import SupabaseVectorStore
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.tools import tool
+from langchain.tools.retriever import create_retriever_tool
+from supabase.client import Client, create_client
 
-# Import all tools from tools.py
-from tools import (
-    WebSearchTool, WikiSearchTool, debug_print,
-    download_from_url, extract_text_from_image, analyze_tabular_file,
-    save_and_read_file, open_and_read_file, analyze_csv_file,
-    analyze_excel_file, arxiv_search, analyze_video, handle_file_reference,
-    find_uploaded_files, global_rate_limiter, analyze_image, analyze_table, analyze_list
+load_dotenv()
+
+@tool
+def multiply(a: int, b: int) -> int:
+    """Multiply two numbers.
+    Args:
+        a: first int
+        b: second int
+    """
+    return a * b
+
+@tool
+def add(a: int, b: int) -> int:
+    """Add two numbers.
+    Args:
+        a: first int
+        b: second int
+    """
+    return a + b
+
+@tool
+def subtract(a: int, b: int) -> int:
+    """Subtract two numbers.
+    Args:
+        a: first int
+        b: second int
+    """
+    return a - b
+
+@tool
+def divide(a: int, b: int) -> int:
+    """Divide two numbers.
+    Args:
+        a: first int
+        b: second int
+    """
+    if b == 0:
+        raise ValueError("Cannot divide by zero.")
+    return a / b
+
+@tool
+def modulus(a: int, b: int) -> int:
+    """Get the modulus of two numbers.
+    Args:
+        a: first int
+        b: second int
+    """
+    return a % b
+
+@tool
+def wiki_search(query: str) -> str:
+    """Search Wikipedia for a query and return maximum 2 results.
+    Args:
+        query: The search query."""
+    search_docs = WikipediaLoader(query=query, load_max_docs=2).load()
+    formatted_search_docs = "\n\n---\n\n".join(
+        [
+            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/>\n{doc.page_content}\n</Document>'
+            for doc in search_docs
+        ])
+    return {"wiki_results": formatted_search_docs}
+
+@tool
+def web_search(query: str) -> str:
+    """Search Tavily for a query and return maximum 3 results.
+    Args:
+        query: The search query."""
+    search_docs = TavilySearchResults(max_results=3).invoke(query=query)
+    formatted_search_docs = "\n\n---\n\n".join(
+        [
+            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/>\n{doc.page_content}\n</Document>'
+            for doc in search_docs
+        ])
+    return {"web_results": formatted_search_docs}
+
+@tool
+def arvix_search(query: str) -> str:
+    """Search Arxiv for a query and return maximum 3 result.
+    Args:
+        query: The search query."""
+    search_docs = ArxivLoader(query=query, load_max_docs=3).load()
+    formatted_search_docs = "\n\n---\n\n".join(
+        [
+            f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/>\n{doc.page_content[:1000]}\n</Document>'
+            for doc in search_docs
+        ])
+    return {"arvix_results": formatted_search_docs}
+
+
+
+# load the system prompt from the file
+with open("system_prompt.txt", "r", encoding="utf-8") as f:
+    system_prompt = f.read()
+
+# System message
+sys_msg = SystemMessage(content=system_prompt)
+
+# build a retriever
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2") #  dim=768
+supabase: Client = create_client(
+    os.environ.get("SUPABASE_URL"),
+    os.environ.get("SUPABASE_SERVICE_KEY"))
+vector_store = SupabaseVectorStore(
+    client=supabase,
+    embedding= embeddings,
+    table_name="documents",
+    query_name="match_documents_langchain",
+)
+create_retriever_tool = create_retriever_tool(
+    retriever=vector_store.as_retriever(),
+    name="Question Search",
+    description="A tool to retrieve similar questions from a vector store.",
 )
 
-# Load environment variables
-load_dotenv()
-debug_print("Environment variables loaded")
 
-# Load system prompt from environment variable or file
-system_prompt = os.getenv("SYSTEM_PROMPT")
-if system_prompt:
-    print(f"System prompt loaded from environment variable, length: {len(system_prompt)} characters")
-else:
-    system_prompt_path = os.getenv("SYSTEM_PROMPT_PATH", "system_prompt.txt")
-    print(f"Loading system prompt from file: {system_prompt_path}")
-    try:
-        with open(system_prompt_path, "r", encoding="utf-8") as f:
-            system_prompt = f.read()
-        print(f"System prompt loaded from file, length: {len(system_prompt)} characters")
-    except Exception as e:
-        print(f"Error loading system prompt: {str(e)}")
-        system_prompt = "You are a helpful assistant."
-        debug_print(f"Using default system prompt due to error: {str(e)}")
 
-class GeminiAgent:
-    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash"):
-        debug_print(f"Initializing GeminiAgent with model: {model_name}")
-        # Suppress warnings
-        import warnings
-        warnings.filterwarnings("ignore", category=UserWarning)
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
-        warnings.filterwarnings("ignore", message=".*will be deprecated.*")
-        warnings.filterwarnings("ignore", "LangChain.*")
-        
-        self.api_key = api_key
-        self.model_name = model_name
-        
-        # Configure Gemini
-        debug_print("Configuring Gemini API")
-        genai.configure(api_key=api_key)
-        
-        # Initialize the LLM
-        debug_print("Setting up LLM")
-        self.llm = self._setup_llm()
-        
-        # Setup tools
-        debug_print("Setting up tools")
-        self.tools = self._setup_tools()
-        
-        # Setup memory
-        debug_print("Setting up conversation memory")
-        self.memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
-        
-        # Initialize agent
-        debug_print("Setting up agent")
-        self.agent = self._setup_agent()
-        debug_print("GeminiAgent initialization complete")
+tools = [
+    multiply,
+    add,
+    subtract,
+    divide,
+    modulus,
+    wiki_search,
+    web_search,
+    arvix_search,
+]
 
-    def preprocess_query(self, query: str) -> str:
-        """Preprocess query to handle common issues."""
-        # Handle file references
-        file_check = handle_file_reference(query)
-        if file_check and "cannot access" in file_check:
-            return file_check
-        
-        # Handle video references
-        if any(domain in query for domain in ['youtube.com', 'youtu.be']):
-            import re
-            youtube_pattern = r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]+)'
-            youtube_match = re.search(youtube_pattern, query)
-            if youtube_match:
-                video_id = youtube_match.group(1)
-                return f"I can see you're asking about a YouTube video (ID: {video_id}), but I cannot directly access or analyze video content. I can only see the URL you've provided: {youtube_match.group(0)}. To help you better, please describe what you're looking for in the video or provide any specific details you'd like me to research about."
-        
-        return query
-
-    def handle_rate_limit_recovery(self, attempt: int, max_retries: int) -> bool:
-        """Handle rate limit recovery with progressive delays."""
-        if attempt >= max_retries:
-            return False
-        
-        # Progressive delay: 65s, 90s, 120s, 180s
-        delays = [65, 90, 120, 180]
-        delay = delays[min(attempt, len(delays) - 1)]
-        
-        debug_print(f"Rate limit recovery: attempt {attempt + 1}, waiting {delay}s")
-        print(f"Rate limit hit. Implementing recovery strategy: waiting {delay} seconds...")
-        
-        # Show countdown for user feedback
-        for remaining in range(delay, 0, -10):
-            if remaining <= 10:
-                print(f"Resuming in {remaining} seconds...")
-                time.sleep(remaining)
-                break
-            else:
-                print(f"Waiting... {remaining} seconds remaining")
-                time.sleep(10)
-        
-        return True
-
-    def run(self, query: str) -> str:
-        """Run the agent on a query with incremental retries."""
-        debug_print(f"Running agent with query: {query}")
-        
-        # Preprocess the query
-        preprocessed_query = self.preprocess_query(query)
-        if preprocessed_query != query:
-            return preprocessed_query
-        
-        max_retries = 5
-        base_sleep = 2  # Start with 2 second sleep
-        
-        # Check global rate limiter
-        wait_time = global_rate_limiter.should_wait_for_google_api()
-        if wait_time > 0:
-            print(f"Global rate limiter active. Waiting {wait_time:.1f} seconds...")
-            time.sleep(wait_time)
-        
-        # Check if the query contains a YouTube URL
-        if "youtube.com" in query or "youtu.be" in query:
-            try:
-                # Use Gemini's native video analysis
-                model = genai.GenerativeModel(self.model_name)
-                response = model.generate_content(query)
-                global_rate_limiter.record_google_api_call(success=True)
-                return response.text
-            except Exception as e:
-                debug_print(f"Error in video analysis: {str(e)}")
-                global_rate_limiter.record_google_api_call(success=False)
-                return f"Error analyzing video: {str(e)}"
-        
-        # Reset tool call counts for new query
-        for tool in self.tools:
-            if hasattr(tool.func, 'reset'):
-                tool.func.reset()
-        
-        for attempt in range(max_retries):
-            try:
-                debug_print(f"Attempt {attempt + 1}/{max_retries}")
-                
-                # Check if we're heavily rate limited
-                if global_rate_limiter.is_heavily_rate_limited():
-                    return "The system is experiencing heavy rate limiting. Please try again in a few minutes."
-                
-                response = self.agent.run(query)
-                debug_print(f"Agent response received (length: {len(response)})")
-                global_rate_limiter.record_google_api_call(success=True)
-                return response
-
-            except Exception as e:
-                debug_print(f"Error in attempt {attempt + 1}: {str(e)}")
-                
-                # Check if it's a rate limit error
-                if "429" in str(e) or "quota" in str(e).lower() or "rate limit" in str(e).lower():
-                    global_rate_limiter.record_google_api_call(success=False)
-                    
-                    if attempt < max_retries - 1:
-                        if not self.handle_rate_limit_recovery(attempt, max_retries):
-                            break
-                        continue
-                
-                # For other errors, use exponential backoff but shorter
-                sleep_time = min(base_sleep * (2 ** attempt), 30)  # Cap at 30 seconds for non-rate-limit errors
-                if attempt < max_retries - 1:
-                    debug_print(f"Retrying in {sleep_time} seconds...")
-                    print(f"Attempt {attempt + 1} failed. Retrying in {sleep_time} seconds...")
-                    time.sleep(sleep_time)
-                    continue
-                
-                debug_print(f"All {max_retries} attempts failed")
-                return f"Error processing query after {max_retries} attempts: {str(e)}"
-
-    def _setup_llm(self):
-        """Set up the language model."""
-        debug_print(f"Setting up {self.model_name} LLM")
-        try:
-            # Configure the model for multimodal capabilities
-            model = genai.GenerativeModel(self.model_name)
-            
-            llm = ChatGoogleGenerativeAI(
-                model=self.model_name,
-                google_api_key=self.api_key,
+# Build graph function
+def build_graph(provider: str = "groq"):
+    """Build the graph"""
+    # Load environment variables from .env file
+    if provider == "google":
+        # Google Gemini
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
+    elif provider == "groq":
+        # Groq https://console.groq.com/docs/models
+        llm = ChatGroq(model="qwen-qwq-32b", temperature=0) 
+    elif provider == "openai":
+        # OpenAI
+        llm = ChatOpenAI(model="gpt-4", temperature=0)
+    elif provider == "huggingface":
+        llm = ChatHuggingFace(
+            llm=HuggingFaceEndpoint(
+                url="https://api-inference.huggingface.co/models/Meta-DeepLearning/llama-2-7b-chat-hf",
                 temperature=0,
-                max_output_tokens=2000,
-                convert_system_message_to_human=True,
-                system=system_prompt,
-                request_timeout=120,  # Increase timeout to 2 minutes
-                max_retries=3,  # Reduce retries since we handle them manually
-                model_kwargs={
-                    "generation_config": {
-                        "temperature": 0,
-                        "top_p": 1,
-                        "top_k": 32,
-                        "max_output_tokens": 2000,
-                    }
-                }
-            )
-            debug_print("LLM setup successful")
-            return llm
-        except Exception as e:
-            debug_print(f"Error setting up LLM: {str(e)}")
-            raise
-        
-    def _setup_tools(self):
-        """Set up the tools for the agent."""
-        debug_print("Setting up agent tools")
-        
-        # Create instances of class-based tools
-        wiki_search_tool = WikiSearchTool()
-        web_search_tool = WebSearchTool()
-        
-        tools = [
-            Tool(
-                name=wiki_search_tool.name,
-                func=wiki_search_tool,
-                description=wiki_search_tool.description
             ),
-            Tool(
-                name=web_search_tool.name,
-                func=web_search_tool,
-                description=web_search_tool.description
-            ),
-            Tool(
-                name="arxiv_search",
-                func=arxiv_search,
-                description="Search arXiv for academic papers based on a query and return results"
-            ),
-            Tool(
-                name="analyze_video",
-                func=analyze_video,
-                description="Analyze YouTube video content directly"
-            ),
-            Tool(
-                name="analyze_image",
-                func=analyze_image,
-                description="Analyze image content"
-            ),
-            Tool(
-                name="analyze_table",
-                func=analyze_table,
-                description="Analyze table or matrix data"
-            ),
-            Tool(
-                name="analyze_list",
-                func=analyze_list,
-                description="Analyze and categorize list items"
-            ),
-            Tool(
-                name="download_from_url",
-                func=download_from_url,
-                description="Download a file from a URL"
-            ),
-            Tool(
-                name="extract_text_from_image",
-                func=extract_text_from_image,
-                description="Extract text from an image"
-            ),
-            Tool(
-                name="analyze_tabular_file",
-                func=analyze_tabular_file,
-                description="Analyze a tabular file (CSV or Excel)"
-            ),
-            Tool(
-                name="open_and_read_file",
-                func=open_and_read_file,
-                description="Open and read the contents of a file"
-            ),
-            Tool(
-                name="save_and_read_file",
-                func=save_and_read_file,
-                description="Save content to a file and return the path"
-            ),
-            Tool(
-                name="analyze_csv_file",
-                func=analyze_csv_file,
-                description="Analyze a CSV file using pandas"
-            ),
-            Tool(
-                name="analyze_excel_file",
-                func=analyze_excel_file,
-                description="Analyze an Excel file using pandas"
-            ),
-            Tool(
-                name="find_uploaded_files",
-                func=find_uploaded_files,
-                description="Find uploaded files in the system"
-            ),
-            Tool(
-                name="handle_file_reference", 
-                func=handle_file_reference,
-                description="Handle queries that reference files"
-            ),
-           
-        ]
-        debug_print(f"Set up {len(tools)} tools")
-        return tools
-        
-    def _setup_agent(self) -> AgentExecutor:
-        """Set up the agent with tools and system message."""
-        debug_print("Setting up agent executor")
-        try:
-            # Initialize agent executor with improved settings
-            agent = initialize_agent(
-                agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-                tools=self.tools,
-                llm=self.llm,
-                verbose=True,
-                memory=self.memory,
-                max_iterations=10,  # Increased from default
-                max_execution_time=300,  # 5 minutes timeout
-                early_stopping_method="generate",
-                handle_parsing_errors=True,
-                return_only_outputs=True
-            )
-            debug_print("Agent executor setup successful")
-            return agent
-        except Exception as e:
-            debug_print(f"Error setting up agent: {str(e)}")
-            raise
+        )
+    else:
+        raise ValueError("Invalid provider. Choose 'google', 'groq' or 'huggingface'.")
+    # Bind tools to LLM
+    llm_with_tools = llm.bind_tools(tools)
 
-def create_agent(provider: str = "google") -> GeminiAgent:
-    """
-    Create an agent using the specified provider.
-    Currently only supports Google's Gemini.
-    
-    Args:
-        provider: The provider to use (only "google" is supported)
-        
-    Returns:
-        A GeminiAgent instance
-    """
-    debug_print(f"Creating agent with provider: {provider}")
-    if provider.lower() != "google":
-        debug_print(f"Provider {provider} not supported, defaulting to Google Gemini")
-        print(f"Warning: Provider {provider} not supported. Using Google Gemini.")
-    
-    # Get the API key from environment variables
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        debug_print("GOOGLE_API_KEY not found in environment variables")
-        raise ValueError("GOOGLE_API_KEY not found in environment variables")
-    
-    debug_print("API key found, creating GeminiAgent")
-    # Create and return the agent
-    return GeminiAgent(api_key=api_key)
+    # Node
+    def assistant(state: MessagesState):
+        """Assistant node"""
+        return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
-if __name__ == "__main__":
-    debug_print("Script started as main")
-    print("Creating agent with Google provider")
-    try:
-        agent = create_agent("google")
-        print("Agent created. Type 'exit' to quit.")
-        debug_print("Agent created successfully")
-        
-        while True:
-            query = input("\nYour question: ")
-            debug_print(f"User input: {query}")
-            
-            if query.lower() in ("exit", "quit"):
-                debug_print("User requested exit")
-                print("Goodbye!")
-                break
-            
-            try:
-                print("\n[Searching and generating answer...]")
-                
-                start_time = time.time()
-                debug_print(f"Starting agent run at {start_time}")
-                resp = agent.run(query)
-                end_time = time.time()
-                elapsed = end_time - start_time
-                debug_print(f"Agent run completed in {elapsed:.2f} seconds")
-                print(f"Response generated in {elapsed:.2f} seconds")
-                
-                print(f"\nResponse: {resp}")
-                    
-            except RuntimeError as e:
-                debug_print(f"RuntimeError: {str(e)}")
-                if "Call limit reached" in str(e):
-                    print("\n[Note]: Search limit reached. Moving on with partial results.")
-                else:
-                    print(f"\n[Error]: {str(e)}")
-            except Exception as e:
-                debug_print(f"Unexpected error: {str(e)}")
-                print(f"\n[Error]: An unexpected error occurred: {str(e)}")
-                print("Please try again or check your configuration.")
-    except Exception as e:
-        debug_print(f"Error during agent creation: {str(e)}")
-        print(f"Failed to create agent: {str(e)}")
-        print("Please ensure GOOGLE_API_KEY is set in your environment variables.")
+    def retriever(state: MessagesState):
+        """Retriever node"""
+        similar_question = vector_store.similarity_search(state["messages"][0].content)
+        example_msg = HumanMessage(
+            content=f"Here I provide a similar question and answer for reference: \n\n{similar_question[0].page_content}",
+        )
+        return {"messages": [sys_msg] + state["messages"] + [example_msg]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("retriever", retriever)
+    builder.add_node("assistant", assistant)
+    builder.add_node("tools", ToolNode(tools))
+    builder.add_edge(START, "retriever")
+    builder.add_edge("retriever", "assistant")
+    builder.add_conditional_edges(
+        "assistant",
+        tools_condition,
+    )
+    builder.add_edge("tools", "assistant")
+
+    # Compile graph
+    return builder.compile()
