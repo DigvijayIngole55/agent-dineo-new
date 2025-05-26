@@ -17,7 +17,7 @@ from tools import (
     download_from_url, extract_text_from_image, analyze_tabular_file,
     save_and_read_file, open_and_read_file, analyze_csv_file,
     analyze_excel_file, arxiv_search, analyze_video, handle_file_reference,
-    find_uploaded_files, global_rate_limiter
+    find_uploaded_files, global_rate_limiter, analyze_image, analyze_table, analyze_list
 )
 
 # Load environment variables
@@ -244,7 +244,27 @@ class GeminiAgent:
             Tool(
                 name="arxiv_search",
                 func=arxiv_search,
-                description="Search arXiv for academic papers based on a query and return results."
+                description="Search arXiv for academic papers based on a query and return results"
+            ),
+            Tool(
+                name="analyze_video",
+                func=analyze_video,
+                description="Analyze YouTube video content directly"
+            ),
+            Tool(
+                name="analyze_image",
+                func=analyze_image,
+                description="Analyze image content"
+            ),
+            Tool(
+                name="analyze_table",
+                func=analyze_table,
+                description="Analyze table or matrix data"
+            ),
+            Tool(
+                name="analyze_list",
+                func=analyze_list,
+                description="Analyze and categorize list items"
             ),
             Tool(
                 name="download_from_url",
