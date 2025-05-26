@@ -16,7 +16,8 @@ from tools import (
     WebSearchTool, WikiSearchTool, debug_print,
     download_from_url, extract_text_from_image, analyze_tabular_file,
     save_and_read_file, open_and_read_file, analyze_csv_file,
-    analyze_excel_file, arxiv_search, analyze_video
+    analyze_excel_file, arxiv_search, analyze_video, handle_file_reference,
+    find_uploaded_files, multi_source_search, global_rate_limiter
 )
 
 # Load environment variables
@@ -76,11 +77,65 @@ class GeminiAgent:
         self.agent = self._setup_agent()
         debug_print("GeminiAgent initialization complete")
 
+    def preprocess_query(self, query: str) -> str:
+        """Preprocess query to handle common issues."""
+        # Handle file references
+        file_check = handle_file_reference(query)
+        if file_check and "cannot access" in file_check:
+            return file_check
+        
+        # Handle video references
+        if any(domain in query for domain in ['youtube.com', 'youtu.be']):
+            import re
+            youtube_pattern = r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]+)'
+            youtube_match = re.search(youtube_pattern, query)
+            if youtube_match:
+                video_id = youtube_match.group(1)
+                return f"I can see you're asking about a YouTube video (ID: {video_id}), but I cannot directly access or analyze video content. I can only see the URL you've provided: {youtube_match.group(0)}. To help you better, please describe what you're looking for in the video or provide any specific details you'd like me to research about."
+        
+        return query
+
+    def handle_rate_limit_recovery(self, attempt: int, max_retries: int) -> bool:
+        """Handle rate limit recovery with progressive delays."""
+        if attempt >= max_retries:
+            return False
+        
+        # Progressive delay: 65s, 90s, 120s, 180s
+        delays = [65, 90, 120, 180]
+        delay = delays[min(attempt, len(delays) - 1)]
+        
+        debug_print(f"Rate limit recovery: attempt {attempt + 1}, waiting {delay}s")
+        print(f"Rate limit hit. Implementing recovery strategy: waiting {delay} seconds...")
+        
+        # Show countdown for user feedback
+        for remaining in range(delay, 0, -10):
+            if remaining <= 10:
+                print(f"Resuming in {remaining} seconds...")
+                time.sleep(remaining)
+                break
+            else:
+                print(f"Waiting... {remaining} seconds remaining")
+                time.sleep(10)
+        
+        return True
+
     def run(self, query: str) -> str:
         """Run the agent on a query with incremental retries."""
         debug_print(f"Running agent with query: {query}")
+        
+        # Preprocess the query
+        preprocessed_query = self.preprocess_query(query)
+        if preprocessed_query != query:
+            return preprocessed_query
+        
         max_retries = 5
         base_sleep = 2  # Start with 2 second sleep
+        
+        # Check global rate limiter
+        wait_time = global_rate_limiter.should_wait_for_google_api()
+        if wait_time > 0:
+            print(f"Global rate limiter active. Waiting {wait_time:.1f} seconds...")
+            time.sleep(wait_time)
         
         # Check if the query contains a YouTube URL
         if "youtube.com" in query or "youtu.be" in query:
@@ -88,9 +143,11 @@ class GeminiAgent:
                 # Use Gemini's native video analysis
                 model = genai.GenerativeModel(self.model_name)
                 response = model.generate_content(query)
+                global_rate_limiter.record_google_api_call(success=True)
                 return response.text
             except Exception as e:
                 debug_print(f"Error in video analysis: {str(e)}")
+                global_rate_limiter.record_google_api_call(success=False)
                 return f"Error analyzing video: {str(e)}"
         
         # Reset tool call counts for new query
@@ -101,25 +158,30 @@ class GeminiAgent:
         for attempt in range(max_retries):
             try:
                 debug_print(f"Attempt {attempt + 1}/{max_retries}")
+                
+                # Check if we're heavily rate limited
+                if global_rate_limiter.is_heavily_rate_limited():
+                    return "The system is experiencing heavy rate limiting. Please try again in a few minutes."
+                
                 response = self.agent.run(query)
                 debug_print(f"Agent response received (length: {len(response)})")
+                global_rate_limiter.record_google_api_call(success=True)
                 return response
 
             except Exception as e:
                 debug_print(f"Error in attempt {attempt + 1}: {str(e)}")
                 
                 # Check if it's a rate limit error
-                if "429" in str(e) or "quota" in str(e).lower():
-                    # Exponential backoff for rate limits
-                    sleep_time = base_sleep * (2 ** attempt) + random.uniform(0, 1)
+                if "429" in str(e) or "quota" in str(e).lower() or "rate limit" in str(e).lower():
+                    global_rate_limiter.record_google_api_call(success=False)
+                    
                     if attempt < max_retries - 1:
-                        debug_print(f"Rate limit hit. Waiting {sleep_time:.1f} seconds...")
-                        print(f"Rate limit reached. Waiting {sleep_time:.1f} seconds before retry...")
-                        time.sleep(sleep_time)
+                        if not self.handle_rate_limit_recovery(attempt, max_retries):
+                            break
                         continue
                 
-                # For other errors, use shorter sleep
-                sleep_time = base_sleep * (attempt + 1)
+                # For other errors, use exponential backoff but shorter
+                sleep_time = min(base_sleep * (2 ** attempt), 30)  # Cap at 30 seconds for non-rate-limit errors
                 if attempt < max_retries - 1:
                     debug_print(f"Retrying in {sleep_time} seconds...")
                     print(f"Attempt {attempt + 1} failed. Retrying in {sleep_time} seconds...")
@@ -143,6 +205,8 @@ class GeminiAgent:
                 max_output_tokens=2000,
                 convert_system_message_to_human=True,
                 system=system_prompt,
+                request_timeout=120,  # Increase timeout to 2 minutes
+                max_retries=3,  # Reduce retries since we handle them manually
                 model_kwargs={
                     "generation_config": {
                         "temperature": 0,
@@ -197,11 +261,6 @@ class GeminiAgent:
                 func=analyze_tabular_file,
                 description="Analyze a tabular file (CSV or Excel)"
             ),
-            # Tool(
-            #     name="analyze_video",
-            #     func=analyze_video,
-            #     description="Analyze YouTube video content"
-            # ),
             Tool(
                 name="open_and_read_file",
                 func=open_and_read_file,
@@ -221,6 +280,21 @@ class GeminiAgent:
                 name="analyze_excel_file",
                 func=analyze_excel_file,
                 description="Analyze an Excel file using pandas"
+            ),
+            Tool(
+                name="find_uploaded_files",
+                func=find_uploaded_files,
+                description="Find uploaded files in the system"
+            ),
+            Tool(
+                name="handle_file_reference", 
+                func=handle_file_reference,
+                description="Handle queries that reference files"
+            ),
+            Tool(
+                name="multi_source_search",
+                func=multi_source_search, 
+                description="Search multiple sources for comprehensive results"
             ),
         ]
         debug_print(f"Set up {len(tools)} tools")
