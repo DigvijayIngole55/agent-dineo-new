@@ -17,7 +17,7 @@ from tools import (
     download_from_url, extract_text_from_image, analyze_tabular_file,
     save_and_read_file, open_and_read_file, analyze_csv_file,
     analyze_excel_file, arxiv_search, analyze_video, handle_file_reference,
-    find_uploaded_files, multi_source_search, global_rate_limiter
+    find_uploaded_files, global_rate_limiter
 )
 
 # Load environment variables
@@ -291,11 +291,7 @@ class GeminiAgent:
                 func=handle_file_reference,
                 description="Handle queries that reference files"
             ),
-            Tool(
-                name="multi_source_search",
-                func=multi_source_search, 
-                description="Search multiple sources for comprehensive results"
-            ),
+           
         ]
         debug_print(f"Set up {len(tools)} tools")
         return tools
