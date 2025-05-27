@@ -354,32 +354,32 @@ def build_graph(provider: str = "groq"):
                 logger.info("=== RETRIEVER NODE COMPLETED ===")
                 return result
         
-    except Exception as e:
-        logger.error(f"RETRIEVER NODE ERROR: {str(e)}")
-        logger.error(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
-        # Fallback to error message
-        return {"messages": [AIMessage(content=f"Error in retrieval: {str(e)}")]}
-
-        logger.info("Building state graph...")
-        builder = StateGraph(MessagesState)
-        builder.add_node("retriever", retriever)
-        builder.add_node("assistant", assistant)
-        builder.add_node("tools", ToolNode(tools))
+            except Exception as e:
+                logger.error(f"RETRIEVER NODE ERROR: {str(e)}")
+                logger.error(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
+                # Fallback to error message
+                return {"messages": [AIMessage(content=f"Error in retrieval: {str(e)}")]}
         
-        builder.add_edge(START, "retriever")
-        builder.add_edge("retriever", "assistant")
-        builder.add_conditional_edges(
-            "assistant",
-            tools_condition,
-        )
-        builder.add_edge("tools", "assistant")
-
-        logger.info("Compiling graph...")
-        graph = builder.compile()
-        logger.info("=== GRAPH BUILT SUCCESSFULLY ===")
-        return graph
+                logger.info("Building state graph...")
+                builder = StateGraph(MessagesState)
+                builder.add_node("retriever", retriever)
+                builder.add_node("assistant", assistant)
+                builder.add_node("tools", ToolNode(tools))
+                
+                builder.add_edge(START, "retriever")
+                builder.add_edge("retriever", "assistant")
+                builder.add_conditional_edges(
+                    "assistant",
+                    tools_condition,
+                )
+                builder.add_edge("tools", "assistant")
         
-    except Exception as e:
-        logger.error(f"GRAPH BUILD ERROR: {str(e)}")
-        logger.error(f"GRAPH BUILD TRACEBACK: {traceback.format_exc()}")
-        raise
+                logger.info("Compiling graph...")
+                graph = builder.compile()
+                logger.info("=== GRAPH BUILT SUCCESSFULLY ===")
+                return graph
+                
+            except Exception as e:
+                logger.error(f"GRAPH BUILD ERROR: {str(e)}")
+                logger.error(f"GRAPH BUILD TRACEBACK: {traceback.format_exc()}")
+                raise
