@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables.graph import MermaidDrawMethod
-from main_agent import build_graph
+from agent import build_graph
 
 
 
