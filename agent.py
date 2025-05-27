@@ -324,38 +324,41 @@ def build_graph(provider: str = "groq"):
         def retriever(state: MessagesState):
             """Retriever node"""
             logger.info("=== RETRIEVER NODE CALLED ===")
-            
             try:
                 if vector_store is None:
                     logger.warning("Vector store not available, skipping retrieval")
-                    return {"messages": [sys_msg] + state["messages"]}
+                    return {"messages": [AIMessage(content="Vector store not available")]}
                 
-                query = state["messages"][0].content
+                query = state["messages"][-1].content  # Get the last message instead of first
                 logger.info(f"Searching for similar questions with query: {query[:100]}...")
-                
-                similar_question = vector_store.similarity_search(query)
+                similar_question = vector_store.similarity_search(query, k=1)  # Limit to 1 result
                 logger.info(f"Found {len(similar_question)} similar questions")
                 
                 if similar_question:
-                    example_content = similar_question[0].page_content
-                    logger.info(f"Using similar question (first 100 chars): {example_content[:100]}...")
+                    content = similar_question[0].page_content
+                    logger.info(f"Retrieved content (first 100 chars): {content[:100]}...")
                     
-                    example_msg = HumanMessage(
-                        content=f"Here I provide a similar question and answer for reference: \n\n{example_content}",
-                    )
-                    result = {"messages": [sys_msg] + state["messages"] + [example_msg]}
+                    # Process the content to remove "Final answer :" prefix if present
+                    if "Final answer :" in content:
+                        answer = content.split("Final answer :")[-1].strip()
+                        logger.info("Removed 'Final answer :' prefix from retrieved content")
+                    else:
+                        answer = content.strip()
+                    
+                    logger.info(f"Processed answer (first 100 chars): {answer[:100]}...")
+                    result = {"messages": [AIMessage(content=answer)]}
                 else:
                     logger.info("No similar questions found")
-                    result = {"messages": [sys_msg] + state["messages"]}
+                    result = {"messages": [AIMessage(content="No similar questions found in the database.")]}
                 
                 logger.info("=== RETRIEVER NODE COMPLETED ===")
                 return result
-                
-            except Exception as e:
-                logger.error(f"RETRIEVER NODE ERROR: {str(e)}")
-                logger.error(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
-                # Fallback to just system message + user messages
-                return {"messages": [sys_msg] + state["messages"]}
+        
+    except Exception as e:
+        logger.error(f"RETRIEVER NODE ERROR: {str(e)}")
+        logger.error(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
+        # Fallback to error message
+        return {"messages": [AIMessage(content=f"Error in retrieval: {str(e)}")]}
 
         logger.info("Building state graph...")
         builder = StateGraph(MessagesState)
