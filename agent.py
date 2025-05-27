@@ -12,7 +12,7 @@ from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingF
 from langchain_community.document_loaders import WikipediaLoader
 from langchain_community.document_loaders import ArxivLoader
 from langchain_community.vectorstores import SupabaseVectorStore
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
 from langchain.tools.retriever import create_retriever_tool
 from supabase.client import Client, create_client
@@ -360,26 +360,26 @@ def build_graph(provider: str = "groq"):
                 # Fallback to error message
                 return {"messages": [AIMessage(content=f"Error in retrieval: {str(e)}")]}
         
-                logger.info("Building state graph...")
-                builder = StateGraph(MessagesState)
-                builder.add_node("retriever", retriever)
-                builder.add_node("assistant", assistant)
-                builder.add_node("tools", ToolNode(tools))
-                
-                builder.add_edge(START, "retriever")
-                builder.add_edge("retriever", "assistant")
-                builder.add_conditional_edges(
-                    "assistant",
-                    tools_condition,
-                )
-                builder.add_edge("tools", "assistant")
+        logger.info("Building state graph...")
+        builder = StateGraph(MessagesState)
+        builder.add_node("retriever", retriever)
+        builder.add_node("assistant", assistant)
+        builder.add_node("tools", ToolNode(tools))
         
-                logger.info("Compiling graph...")
-                graph = builder.compile()
-                logger.info("=== GRAPH BUILT SUCCESSFULLY ===")
-                return graph
-                
-            except Exception as e:
-                logger.error(f"GRAPH BUILD ERROR: {str(e)}")
-                logger.error(f"GRAPH BUILD TRACEBACK: {traceback.format_exc()}")
-                raise
+        builder.add_edge(START, "retriever")
+        builder.add_edge("retriever", "assistant")
+        builder.add_conditional_edges(
+            "assistant",
+            tools_condition,
+        )
+        builder.add_edge("tools", "assistant")
+
+        logger.info("Compiling graph...")
+        graph = builder.compile()
+        logger.info("=== GRAPH BUILT SUCCESSFULLY ===")
+        return graph
+        
+    except Exception as e:
+        logger.error(f"GRAPH BUILD ERROR: {str(e)}")
+        logger.error(f"GRAPH BUILD TRACEBACK: {traceback.format_exc()}")
+        raise
