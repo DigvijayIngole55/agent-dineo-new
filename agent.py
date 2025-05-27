@@ -254,7 +254,7 @@ tools = [
 logger.info(f"Tools initialized: {[tool.name for tool in tools]}")
 
 # Build graph function
-def build_graph(provider: str = "groq"):
+def build_graph(provider: str = "google"):
     """Build the graph"""
     logger.info(f"=== BUILDING GRAPH WITH PROVIDER: {provider} ===")
     
