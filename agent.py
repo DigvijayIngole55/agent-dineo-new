@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from langgraph.graph import START, StateGraph, MessagesState
 from langgraph.prebuilt import tools_condition
 from langgraph.prebuilt import ToolNode
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google.genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFaceEmbeddings
 from langchain_community.document_loaders import WikipediaLoader
@@ -214,22 +214,25 @@ try:
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
     logger.info("HuggingFace embeddings initialized")
     
-    supabase: Client = create_client(
-        os.environ.get("SUPABASE_URL"),
-        os.environ.get("SUPABASE_KEY"))
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in the environment.")
+        
+    supabase: Client = create_client(supabase_url, supabase_key)
     logger.info("Supabase client created")
     
     vector_store = SupabaseVectorStore(
         client=supabase,
         embedding=embeddings,
         table_name="documents",
-        query_name="match_documents_langchain",
+        query_name="match_documents", # Corrected to a more generic name, adjust if needed
     )
     logger.info("Vector store initialized")
     
-    create_retriever_tool = create_retriever_tool(
+    retriever_tool = create_retriever_tool(
         retriever=vector_store.as_retriever(),
-        name="Question Search",
+        name="Question_Search",
         description="A tool to retrieve similar questions from a vector store.",
     )
     logger.info("Retriever tool created successfully")
@@ -238,7 +241,7 @@ except Exception as e:
     logger.error(f"Failed to initialize retriever: {e}")
     logger.error(f"Retriever initialization traceback: {traceback.format_exc()}")
     vector_store = None
-    create_retriever_tool = None
+    retriever_tool = None
 
 tools = [
     multiply,
@@ -250,36 +253,56 @@ tools = [
     serper_web_search,
     arxiv_search,
 ]
+if retriever_tool:
+    tools.append(retriever_tool)
+
 
 logger.info(f"Tools initialized: {[tool.name for tool in tools]}")
 
-# Build graph function
-def build_graph(provider: str = "google"):
-    """Build the graph"""
-    logger.info(f"=== BUILDING GRAPH WITH PROVIDER: {provider} ===")
-    
-    try:
-        # Load environment variables from .env file
-        if provider == "google":
-            # Google Gemini
-            logger.info("Initializing Google Gemini LLM")
-            llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
-        elif provider == "groq":
-            # Groq https://console.groq.com/docs/models
+def get_llm(provider: str = "google"):
+    """Initializes and returns the specified LLM, with a fallback to Groq."""
+    if provider == "google":
+        try:
+            logger.info("Attempting to initialize Google Gemini LLM")
+            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+            # A simple test to see if the API key is valid and the service is available
+            llm.invoke("test")
+            logger.info("Google Gemini LLM initialized successfully.")
+            return llm
+        except Exception as e:
+            logger.warning(f"Failed to initialize Google Gemini LLM: {e}. Falling back to Groq.")
+            provider = "groq"
+
+    if provider == "groq":
+        try:
             logger.info("Initializing Groq LLM")
-            llm = ChatGroq(model="llama3-70b-8192", temperature=0) 
-        elif provider == "huggingface":
+            return ChatGroq(model="llama3-70b-8192", temperature=0)
+        except Exception as e:
+            logger.error(f"Failed to initialize Groq LLM: {e}")
+            raise
+
+    if provider == "huggingface":
+        try:
             logger.info("Initializing HuggingFace LLM")
-            llm = ChatHuggingFace(
+            return ChatHuggingFace(
                 llm=HuggingFaceEndpoint(
-                    url="https://api-inference.huggingface.co/models/Meta-DeepLearning/llama-2-7b-chat-hf",
-                    temperature=0,
+                    repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
+                    temperature=0.1,
                 ),
             )
-        else:
-            raise ValueError(f"Invalid provider: {provider}. Choose 'google', 'groq' or 'huggingface'.")
-        
-        logger.info(f"LLM initialized successfully with provider: {provider}")
+        except Exception as e:
+            logger.error(f"Failed to initialize HuggingFace LLM: {e}")
+            raise
+            
+    raise ValueError(f"Invalid or failed to initialize provider: {provider}")
+
+
+# Build graph function
+def build_graph():
+    """Build the graph"""
+    
+    try:
+        llm = get_llm() # Automatically handles fallback
         
         # Bind tools to LLM
         llm_with_tools = llm.bind_tools(tools)
