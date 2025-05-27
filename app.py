@@ -1,9 +1,12 @@
 import os
+import time
 import gradio as gr
 import requests
-import inspect
 import pandas as pd
-from agent import create_agent
+from langchain_core.messages import HumanMessage
+from langchain_core.runnables.graph import MermaidDrawMethod
+from src.core.build_graph import build_graph
+
 
 
 # (Keep Constants as is)
@@ -12,19 +15,29 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 
 # --- Basic Agent Definition ---
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
+
+
 class BasicAgent:
+    """A langgraph agent."""
     def __init__(self):
-        print("Initializing SmolAgent...")
-        # Create your agent using the function from agent.py
-        self.agent = create_agent("groq")
-        print("SmolAgent initialized successfully")
+        print("BasicAgent initialized.")
+        self.graph = build_graph()
+           
+        img_data = self.graph.get_graph().draw_mermaid_png(draw_method=MermaidDrawMethod.API,)
+
+        with open('graph.png', "wb") as f:
+                f.write(img_data)
 
     def __call__(self, question: str) -> str:
         print(f"Agent received question (first 50 chars): {question[:50]}...")
-        # Use your agent's run method to get an answer
-        answer = self.agent.run(question)
-        print(f"Agent returning answer: {answer[:50]}...")
-        return answer
+        # time sleep to avoid recursion limit
+        time.sleep(20)
+        messages = [HumanMessage(content=question)]
+        result = self.graph.invoke({"messages": messages})
+        answer = result['messages'][-1].content
+        return answer 
+
+
 
 def run_and_submit_all( profile: gr.OAuthProfile | None):
     """
@@ -153,11 +166,9 @@ with gr.Blocks() as demo:
     gr.Markdown(
         """
         **Instructions:**
-
         1.  Please clone this space, then modify the code to define your agent's logic, the tools, the necessary packages, etc ...
         2.  Log in to your Hugging Face account using the button below. This uses your HF username for submission.
         3.  Click 'Run Evaluation & Submit All Answers' to fetch questions, run your agent, submit answers, and see the score.
-
         ---
         **Disclaimers:**
         Once clicking on the "submit button, it can take quite some time ( this is the time for the agent to go through all the questions).
