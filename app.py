@@ -28,7 +28,7 @@ class BasicAgent:
         messages = [HumanMessage(content=question)]
         result = self.graph.invoke({"messages": messages})
         answer = result['messages'][-1].content
-        return answer  # kein [14:] mehr nötig!
+        return answer[14:]
 
 
 
