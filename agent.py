@@ -267,7 +267,7 @@ def build_graph(provider: str = "groq"):
         elif provider == "groq":
             # Groq https://console.groq.com/docs/models
             logger.info("Initializing Groq LLM")
-            llm = ChatGroq(model="qwen-qwq-32b", temperature=0) 
+            llm = ChatGroq(model="llama3-70b-8192", temperature=0) 
         elif provider == "huggingface":
             logger.info("Initializing HuggingFace LLM")
             llm = ChatHuggingFace(
