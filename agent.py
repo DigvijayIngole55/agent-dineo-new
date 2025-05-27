@@ -7,13 +7,14 @@ from langgraph.graph import START, StateGraph, MessagesState
 from langgraph.prebuilt import tools_condition
 from langgraph.prebuilt import ToolNode
 from langchain_google_genai import ChatGoogleGenerativeAI
+
+
 from langchain_groq import ChatGroq
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFaceEmbeddings
+
 from langchain_community.document_loaders import WikipediaLoader
 from langchain_community.document_loaders import ArxivLoader
 from langchain_community.vectorstores import SupabaseVectorStore
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_core.tools import tool
 from langchain.tools.retriever import create_retriever_tool
 from supabase.client import Client, create_client
 
@@ -37,7 +38,6 @@ logger.info(f"SERPER_API_KEY exists: {'SERPER_API_KEY' in os.environ}")
 @tool
 def multiply(a: int, b: int) -> int:
     """Multiply two numbers.
-    Args:
         a: first int
         b: second int
     """
@@ -242,8 +242,6 @@ except Exception as e:
 
 tools = [
     multiply,
-    add,
-    subtract,
     divide,
     modulus,
     wiki_search,
@@ -324,42 +322,39 @@ def build_graph(provider: str = "groq"):
         def retriever(state: MessagesState):
             """Retriever node"""
             logger.info("=== RETRIEVER NODE CALLED ===")
+            
             try:
                 if vector_store is None:
                     logger.warning("Vector store not available, skipping retrieval")
-                    return {"messages": [AIMessage(content="Vector store not available")]}
+                    return {"messages": [sys_msg] + state["messages"]}
                 
-                query = state["messages"][-1].content  # Get the last message instead of first
+                query = state["messages"][0].content
                 logger.info(f"Searching for similar questions with query: {query[:100]}...")
-                similar_question = vector_store.similarity_search(query, k=1)  # Limit to 1 result
+                
+                similar_question = vector_store.similarity_search(query)
                 logger.info(f"Found {len(similar_question)} similar questions")
                 
                 if similar_question:
-                    content = similar_question[0].page_content
-                    logger.info(f"Retrieved content (first 100 chars): {content[:100]}...")
+                    example_content = similar_question[0].page_content
+                    logger.info(f"Using similar question (first 100 chars): {example_content[:100]}...")
                     
-                    # Process the content to remove "Final answer :" prefix if present
-                    if "Final answer :" in content:
-                        answer = content.split("Final answer :")[-1].strip()
-                        logger.info("Removed 'Final answer :' prefix from retrieved content")
-                    else:
-                        answer = content.strip()
-                    
-                    logger.info(f"Processed answer (first 100 chars): {answer[:100]}...")
-                    result = {"messages": [AIMessage(content=answer)]}
+                    example_msg = HumanMessage(
+                        content=f"Here I provide a similar question and answer for reference: \n\n{example_content}",
+                    )
+                    result = {"messages": [sys_msg] + state["messages"] + [example_msg]}
                 else:
                     logger.info("No similar questions found")
-                    result = {"messages": [AIMessage(content="No similar questions found in the database.")]}
+                    result = {"messages": [sys_msg] + state["messages"]}
                 
                 logger.info("=== RETRIEVER NODE COMPLETED ===")
                 return result
-        
+                
             except Exception as e:
                 logger.error(f"RETRIEVER NODE ERROR: {str(e)}")
                 logger.error(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
-                # Fallback to error message
-                return {"messages": [AIMessage(content=f"Error in retrieval: {str(e)}")]}
-        
+                # Fallback to just system message + user messages
+                return {"messages": [sys_msg] + state["messages"]}
+
         logger.info("Building state graph...")
         builder = StateGraph(MessagesState)
         builder.add_node("retriever", retriever)
@@ -373,7 +368,6 @@ def build_graph(provider: str = "groq"):
             tools_condition,
         )
         builder.add_edge("tools", "assistant")
-
         logger.info("Compiling graph...")
         graph = builder.compile()
         logger.info("=== GRAPH BUILT SUCCESSFULLY ===")
