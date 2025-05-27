@@ -1,51 +1,3 @@
-# # Build retriever with better error handling
-# logger.info("=== BUILDING RETRIEVER ===")
-# vector_store = None
-# create_retriever_tool = None
-
-# try:
-#     # Test basic connectivity first
-#     import socket
-#     import urllib.parse
-    
-#     supabase_url = os.environ.get("SUPABASE_URL")
-#     if supabase_url:
-#         parsed_url = urllib.parse.urlparse(supabase_url)
-#         host = parsed_url.hostname
-#         port = parsed_url.port or 443
-        
-#         logger.info(f"Testing connectivity to Supabase host: {host}:{port}")
-#         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#         sock.settimeout(5)
-#         result = sock.connect_ex((host, port))
-#         sock.close()
-        
-#         if result != 0:
-#             logger.error(f"Cannot connect to Supabase host {host}:{port}")
-#             raise ConnectionError(f"Cannot reach Supabase at {host}:{port}")
-#         else:
-#             logger.info(f"Successfully connected to Supabase host {host}:{port}")
-    
-#     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
-#     logger.info("HuggingFace embeddings initialized")
-    
-#     supabase: Client = create_client(
-#         os.environ.get("SUPABASE_URL"),
-#         os.environ.get("SUPABASE_KEY"))
-#     logger.info("Supabase client created")
-    
-#     vector_store = SupabaseVectorStore(
-#         client=supabase,
-#         embedding=embeddings,
-#         table_name="documents",
-#         query_name="match_documents_langchain",
-#     )
-#     logger.info("Vector store initialized")
-    
-#     # Test the vector store with a simple query
-#     logger.info("Testing vector store with simple query...")
-#     test_results = vector_store.similarity_search("test", k=1)
-
 import os
 import logging
 import traceback
@@ -381,14 +333,10 @@ def build_graph(provider: str = "groq"):
                 query = state["messages"][0].content
                 logger.info(f"Searching for similar questions with query: {query[:100]}...")
                 
-                # Add timeout and better error handling for Supabase connection
-                import socket
-                socket.setdefaulttimeout(10)  # 10 second timeout
-                
-                similar_question = vector_store.similarity_search(query, k=1)
+                similar_question = vector_store.similarity_search(query)
                 logger.info(f"Found {len(similar_question)} similar questions")
                 
-                if similar_question and len(similar_question) > 0:
+                if similar_question:
                     example_content = similar_question[0].page_content
                     logger.info(f"Using similar question (first 100 chars): {example_content[:100]}...")
                     
@@ -406,7 +354,6 @@ def build_graph(provider: str = "groq"):
             except Exception as e:
                 logger.error(f"RETRIEVER NODE ERROR: {str(e)}")
                 logger.error(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
-                logger.warning("Retriever failed, continuing without similar questions...")
                 # Fallback to just system message + user messages
                 return {"messages": [sys_msg] + state["messages"]}
 
