@@ -259,7 +259,7 @@ if retriever_tool:
 
 logger.info(f"Tools initialized: {[tool.name for tool in tools]}")
 
-def get_llm(provider: str = "google"):
+def get_llm(provider: str = "groq"):
     """Initializes and returns the specified LLM, with a fallback to Groq."""
     if provider == "google":
         try:
