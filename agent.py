@@ -1,50 +1,50 @@
-# Build retriever with better error handling
-logger.info("=== BUILDING RETRIEVER ===")
-vector_store = None
-create_retriever_tool = None
+# # Build retriever with better error handling
+# logger.info("=== BUILDING RETRIEVER ===")
+# vector_store = None
+# create_retriever_tool = None
 
-try:
-    # Test basic connectivity first
-    import socket
-    import urllib.parse
+# try:
+#     # Test basic connectivity first
+#     import socket
+#     import urllib.parse
     
-    supabase_url = os.environ.get("SUPABASE_URL")
-    if supabase_url:
-        parsed_url = urllib.parse.urlparse(supabase_url)
-        host = parsed_url.hostname
-        port = parsed_url.port or 443
+#     supabase_url = os.environ.get("SUPABASE_URL")
+#     if supabase_url:
+#         parsed_url = urllib.parse.urlparse(supabase_url)
+#         host = parsed_url.hostname
+#         port = parsed_url.port or 443
         
-        logger.info(f"Testing connectivity to Supabase host: {host}:{port}")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5)
-        result = sock.connect_ex((host, port))
-        sock.close()
+#         logger.info(f"Testing connectivity to Supabase host: {host}:{port}")
+#         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#         sock.settimeout(5)
+#         result = sock.connect_ex((host, port))
+#         sock.close()
         
-        if result != 0:
-            logger.error(f"Cannot connect to Supabase host {host}:{port}")
-            raise ConnectionError(f"Cannot reach Supabase at {host}:{port}")
-        else:
-            logger.info(f"Successfully connected to Supabase host {host}:{port}")
+#         if result != 0:
+#             logger.error(f"Cannot connect to Supabase host {host}:{port}")
+#             raise ConnectionError(f"Cannot reach Supabase at {host}:{port}")
+#         else:
+#             logger.info(f"Successfully connected to Supabase host {host}:{port}")
     
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
-    logger.info("HuggingFace embeddings initialized")
+#     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+#     logger.info("HuggingFace embeddings initialized")
     
-    supabase: Client = create_client(
-        os.environ.get("SUPABASE_URL"),
-        os.environ.get("SUPABASE_KEY"))
-    logger.info("Supabase client created")
+#     supabase: Client = create_client(
+#         os.environ.get("SUPABASE_URL"),
+#         os.environ.get("SUPABASE_KEY"))
+#     logger.info("Supabase client created")
     
-    vector_store = SupabaseVectorStore(
-        client=supabase,
-        embedding=embeddings,
-        table_name="documents",
-        query_name="match_documents_langchain",
-    )
-    logger.info("Vector store initialized")
+#     vector_store = SupabaseVectorStore(
+#         client=supabase,
+#         embedding=embeddings,
+#         table_name="documents",
+#         query_name="match_documents_langchain",
+#     )
+#     logger.info("Vector store initialized")
     
-    # Test the vector store with a simple query
-    logger.info("Testing vector store with simple query...")
-    test_results = vector_store.similarity_search("test", k=1)
+#     # Test the vector store with a simple query
+#     logger.info("Testing vector store with simple query...")
+#     test_results = vector_store.similarity_search("test", k=1)
 
 import os
 import logging
