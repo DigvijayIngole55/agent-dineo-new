@@ -44,7 +44,9 @@ try:
     
     # Test the vector store with a simple query
     logger.info("Testing vector store with simple query...")
-    test_results = vector_store.similarity_search("test", k=1)import os
+    test_results = vector_store.similarity_search("test", k=1)
+
+import os
 import logging
 import traceback
 import requests
