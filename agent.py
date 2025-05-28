@@ -353,65 +353,7 @@ if retriever_tool:
     tools.append(retriever_tool)
 print(f"Tools initialized: {[tool.name for tool in tools]}")
 
-class LLMManager:
-    """
-    Manages LLM providers with a fallback and cooldown mechanism.
-    """
-    def __init__(self, llms_with_tools: dict, provider_order: list):
-        """
-        Args:
-            llms_with_tools: A dictionary of provider names to their LLM instances with tools bound.
-            provider_order: A list of provider names in the desired fallback order.
-        """
-        self.llms = llms_with_tools
-        self.provider_order = provider_order
-        self.cooldowns = {provider: 0 for provider in self.llms.keys()}
 
-    def invoke(self, messages: MessagesState):
-        """
-        Invokes the next available LLM based on the fallback order and cooldowns.
-        """
-        for provider in self.provider_order:
-            if provider not in self.llms:
-                print(f"Provider '{provider}' in order list but not initialized.")
-                continue
-            if time.time() < self.cooldowns.get(provider, 0):
-                print(f"Provider '{provider}' is on cooldown. Skipping.")
-                continue
-            print(f"Attempting to use LLM provider: {provider}")
-            llm = self.llms[provider]
-            try:
-                # Successful invocation, return the result
-                response = llm.invoke(messages)
-                print(f"LLM provider '{provider}' succeeded.")
-                return response
-            except Exception as e:
-                print(f"LLM provider '{provider}' failed: {e}")
-                if provider == 'google':
-                    # Specific logic for Google LLM failure
-                    cooldown_duration = 60
-                    self.cooldowns['google'] = time.time() + cooldown_duration
-                    print(f"Google LLM failed. Placing on a {cooldown_duration}s cooldown.")
-                    print("Immediately trying Groq as a specific fallback.")
-                    try:
-                        # Nested attempt to use Groq immediately
-                        response = self.llms['groq'].invoke(messages)
-                        print("Fallback to Groq succeeded.")
-                        return response
-                    except Exception as e_groq:
-                        print(f"Fallback Groq LLM also failed: {e_groq}")
-                        # Put Groq on its own cooldown if it fails here
-                        groq_cooldown_duration_ms = 60
-                        self.cooldowns['groq'] = time.time() + (groq_cooldown_duration_ms / 1000.0)
-                        print(f"Groq LLM failed during fallback. Placing on a {groq_cooldown_duration_ms}ms cooldown.")
-                        # Continue to the next provider in the main list
-                elif provider == 'groq':
-                    # Logic for Groq LLM failure
-                    cooldown_duration_ms = 60
-                    self.cooldowns['groq'] = time.time() + (cooldown_duration_ms / 1000.0)
-                    print(f"Groq LLM failed. Placing on a {cooldown_duration_ms}ms cooldown.")
-        # If all providers in the list have failed
-        raise Exception("All available LLM providers failed.")
 
 def get_llm(provider: str):
     """Initializes and returns the specified LLM."""
@@ -445,106 +387,61 @@ def get_llm(provider: str):
         print(f"Invalid LLM provider specified: {provider}")
         return None
 
-# Build graph function
-def build_graph():
-    """Build the graph"""
-    try:
-        # 1. Initialize all potential LLMs
-        llm_providers = {
-            "google": get_llm("google"),
-            "groq": get_llm("groq"),
-            "huggingface": get_llm("huggingface")
-        }
-
-        # Filter out any providers that failed to initialize
-        initialized_llms = {name: llm for name, llm in llm_providers.items() if llm}
-        if not initialized_llms:
-            raise RuntimeError("No LLMs could be initialized. The application cannot start.")
-
-        print(f"Successfully initialized LLMs: {list(initialized_llms.keys())}")
-
-        # 2. Bind tools to each initialized LLM
-        llms_with_tools = {
-            name: llm.bind_tools(tools) for name, llm in initialized_llms.items()
-        }
-        print("Tools bound to all initialized LLMs")
-
-        # 3. Create the LLMManager with a defined fallback order
-        # The primary attempt will be Google, then Groq, then HuggingFace.
-        fallback_order = ["google", "groq", "huggingface"]
-        llm_manager = LLMManager(llms_with_tools, fallback_order)
-
-        # Node
-        def assistant(state: MessagesState):
-            """Assistant node that uses the LLMManager for robust invocation"""
-            print("=== ASSISTANT NODE CALLED ===")
-            print(f"Assistant received {len(state['messages'])} messages")
-            try:
-                # Use the LLMManager to handle the call
-                response = llm_manager.invoke(state["messages"])
-                print(f"LLM response type: {type(response).__name__}")
-                if hasattr(response, 'tool_calls') and response.tool_calls:
-                    print(f"LLM requested {len(response.tool_calls)} tool calls")
-                else:
-                    print("LLM did not request any tool calls")
-
-                print("=== ASSISTANT NODE COMPLETED ===")
-                return {"messages": [response]}
-            except Exception as e:
-                print(f"ASSISTANT NODE ERROR: {str(e)}")
-                print(f"ASSISTANT NODE TRACEBACK: {traceback.format_exc()}")
-                error_msg = HumanMessage(content=f"I encountered an error after trying all fallbacks: {str(e)}")
-                return {"messages": [error_msg]}
-
-        def retriever(state: MessagesState):
-            """Retriever node"""
-            print("=== RETRIEVER NODE CALLED ===")
-            try:
-                if vector_store is None:
-                    print("Vector store not available, skipping retrieval")
-                    return {"messages": [sys_msg] + state["messages"]}
-
-                query = state["messages"][0].content
-                print(f"Searching for similar questions with query: {query[:100]}...")
-                similar_question = vector_store.similarity_search(query)
-                print(f"Found {len(similar_question)} similar questions")
-
-                if similar_question:
-                    example_content = similar_question[0].page_content
-                    print(f"Using similar question (first 100 chars): {example_content[:100]}...")
-                    example_msg = HumanMessage(
-                        content=f"Here I provide a similar question and answer for reference: \n\n{example_content}",
-                    )
-                    result = {"messages": [sys_msg] + state["messages"] + [example_msg]}
-                else:
-                    print("No similar questions found")
-                    result = {"messages": [sys_msg] + state["messages"]}
-
-                print("=== RETRIEVER NODE COMPLETED ===")
-                return result
-            except Exception as e:
-                print(f"RETRIEVER NODE ERROR: {str(e)}")
-                print(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
-                return {"messages": [sys_msg] + state["messages"]}
-
-        print("Building state graph...")
-        builder = StateGraph(MessagesState)
-        #builder.add_node("retriever", retriever)
-        builder.add_node("assistant", assistant)
-        builder.add_node("tools", ToolNode(tools))
-        builder.add_edge(START, "assistant")
-        #builder.add_edge("retriever", "assistant")
-        builder.add_conditional_edges(
-            "assistant",
-            tools_condition,
+def build_graph(provider: str = "groq"):
+    if provider == "groq":
+        # Groq https://console.groq.com/docs/models
+        llm = ChatGroq(model="qwen-qwq-32b", temperature=0)
+        # llm = ChatGroq(model="deepseek-r1-distill-llama-70b", temperature=0)
+    elif provider == "huggingface":
+        llm = ChatHuggingFace(
+            llm=HuggingFaceEndpoint(
+                repo_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                task="text-generation",  # for chat‐style use “text-generation”
+                max_new_tokens=1024,
+                do_sample=False,
+                repetition_penalty=1.03,
+                temperature=0,
+            ),
+            verbose=True,
         )
-        builder.add_edge("tools", "assistant")
+    else:
+        raise ValueError("Invalid provider. Choose 'groq' or 'huggingface'.")
 
-        print("Compiling graph...")
-        graph = builder.compile()
-        print("=== GRAPH BUILT SUCCESSFULLY ===")
-        return graph
-    except Exception as e:
-        print(f"GRAPH BUILD ERROR: {str(e)}")
-        print(f"GRAPH BUILD TRACEBACK: {traceback.format_exc()}")
-        raise
+    llm_with_tools = llm.bind_tools(tools)
+
+    def assistant(state: MessagesState):
+        """Assistant Node"""
+        return {"messages": [llm_with_tools.invoke(state['messages'])]}
+
+    def retriever(state: MessagesState):
+        """Retriever Node"""
+        # Extract the latest message content
+        query = state['messages'][-1].content
+        similar_question = vector_store.similarity_search(query, k = 2)
+        if similar_question:  
+            example_msg = HumanMessage(
+                content=f"Here I provide a similar question and answer for reference: \n\n{similar_question[0].page_content}",
+            )
+            return {"messages": [sys_msg] + state["messages"] + [example_msg]}
+        else:
+            return {"messages": [sys_msg] + state["messages"]}
+
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("retriever", retriever)
+    builder.add_node("assistant", assistant)
+    builder.add_node("tools", ToolNode(tools))
+    builder.add_edge(START, "retriever")
+    builder.add_edge("retriever", "assistant")
+    builder.add_conditional_edges("assistant", tools_condition)
+    builder.add_edge("tools", "assistant")
+    return builder.compile()
+
+if __name__ == "__main__":
+    question = "How many studio albums were published by Mercedes Sosa between 2000 and 2009 (included)? You can use the latest 2022 version of english wikipedia."
+    # question = """Q is Examine the video at https://www.youtube.com/watch?v=1htKBjuUWec. What does Teal'c say in response to the question "Isn't that hot?"""
+    graph = build_graph(provider="groq")
+    messages = [HumanMessage(content=question)]
+    messages = graph.invoke({"messages": messages})
+    for m in messages["messages"]:
+        m.pretty_print()
