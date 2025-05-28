@@ -413,26 +413,26 @@ def build_graph(provider: str = "groq"):
         """Assistant Node"""
         return {"messages": [llm_with_tools.invoke(state['messages'])]}
 
-    def retriever(state: MessagesState):
-        """Retriever Node"""
-        # Extract the latest message content
-        query = state['messages'][-1].content
-        similar_question = vector_store.similarity_search(query, k = 2)
-        if similar_question:  
-            example_msg = HumanMessage(
-                content=f"Here I provide a similar question and answer for reference: \n\n{similar_question[0].page_content}",
-            )
-            return {"messages": [sys_msg] + state["messages"] + [example_msg]}
-        else:
-            return {"messages": [sys_msg] + state["messages"]}
+    # def retriever(state: MessagesState):
+    #     """Retriever Node"""
+    #     # Extract the latest message content
+    #     query = state['messages'][-1].content
+    #     similar_question = vector_store.similarity_search(query, k = 2)
+    #     if similar_question:  
+    #         example_msg = HumanMessage(
+    #             content=f"Here I provide a similar question and answer for reference: \n\n{similar_question[0].page_content}",
+    #         )
+    #         return {"messages": [sys_msg] + state["messages"] + [example_msg]}
+    #     else:
+    #         return {"messages": [sys_msg] + state["messages"]}
 
 
     builder = StateGraph(MessagesState)
-    builder.add_node("retriever", retriever)
+    # builder.add_node("retriever", retriever)
     builder.add_node("assistant", assistant)
     builder.add_node("tools", ToolNode(tools))
-    builder.add_edge(START, "retriever")
-    builder.add_edge("retriever", "assistant")
+    builder.add_edge(START, "assistant")
+    # builder.add_edge("retriever", "assistant")
     builder.add_conditional_edges("assistant", tools_condition)
     builder.add_edge("tools", "assistant")
     return builder.compile()
