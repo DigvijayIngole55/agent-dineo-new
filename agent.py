@@ -327,14 +327,14 @@ def get_llm(provider: str):
     if provider == "google":
         try:
             logger.info("Initializing Google Gemini LLM")
-            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+            return ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
         except Exception as e:
             logger.error(f"Failed to initialize Google Gemini LLM: {e}")
             return None
     elif provider == "groq":
         try:
             logger.info("Initializing Groq LLM")
-            return ChatGroq(model="llama3-70b-8192", temperature=0)
+            return ChatGroq(model="qwen-qwq-32b", temperature=0)
         except Exception as e:
             logger.error(f"Failed to initialize Groq LLM: {e}")
             return None
