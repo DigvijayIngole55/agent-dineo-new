@@ -528,11 +528,11 @@ def build_graph():
 
         print("Building state graph...")
         builder = StateGraph(MessagesState)
-        builder.add_node("retriever", retriever)
+        #builder.add_node("retriever", retriever)
         builder.add_node("assistant", assistant)
         builder.add_node("tools", ToolNode(tools))
-        builder.add_edge(START, "retriever")
-        builder.add_edge("retriever", "assistant")
+        builder.add_edge(START, "assistant")
+        #builder.add_edge("retriever", "assistant")
         builder.add_conditional_edges(
             "assistant",
             tools_condition,
