@@ -2,6 +2,7 @@ import os
 import logging
 import traceback
 import requests
+import time
 from dotenv import load_dotenv
 from langgraph.graph import START, StateGraph, MessagesState
 from langgraph.prebuilt import tools_condition
@@ -20,8 +21,7 @@ from supabase.client import Client, create_client
 # Set up detailed logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -106,13 +106,13 @@ def wiki_search(query: str) -> str:
     try:
         search_docs = WikipediaLoader(query=query, load_max_docs=2).load()
         logger.info(f"TOOL: wiki_search found {len(search_docs)} documents")
-        
+
         formatted_search_docs = "\n\n---\n\n".join(
             [
                 f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/>\n{doc.page_content}\n</Document>'
                 for doc in search_docs
             ])
-        
+
         result = {"wiki_results": formatted_search_docs}
         logger.info(f"TOOL RESULT: wiki_search completed successfully")
         return result
@@ -127,12 +127,12 @@ def serper_web_search(query: str) -> str:
     Args:
         query: The search query."""
     logger.info(f"TOOL: serper_web_search('{query[:50]}...')")
-    
+
     api_key = os.getenv('SERPER_API_KEY')
     if not api_key:
         logger.error("TOOL ERROR: SERPER_API_KEY not found in environment variables")
         return {"web_results": "Error: SERPER_API_KEY not configured"}
-    
+
     try:
         url = "https://google.serper.dev/search"
         payload = {
@@ -143,26 +143,26 @@ def serper_web_search(query: str) -> str:
             'X-API-KEY': api_key,
             'Content-Type': 'application/json'
         }
-        
+
         logger.info(f"TOOL: Making request to Serper API")
         response = requests.post(url, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
-        
+
         data = response.json()
         logger.info(f"TOOL: serper_web_search got response with {len(data.get('organic', []))} results")
-        
+
         # Format the results
         formatted_results = []
         for result in data.get('organic', [])[:5]:
             formatted_result = f'<Document source="{result.get("link", "")}" title="{result.get("title", "")}"/>\n{result.get("snippet", "")}\n</Document>'
             formatted_results.append(formatted_result)
-        
+
         formatted_search_docs = "\n\n---\n\n".join(formatted_results)
         result = {"web_results": formatted_search_docs}
-        
+
         logger.info(f"TOOL RESULT: serper_web_search completed successfully")
         return result
-        
+
     except requests.exceptions.RequestException as e:
         logger.error(f"TOOL ERROR: serper_web_search network error - {str(e)}")
         logger.error(f"TOOL ERROR: serper_web_search traceback - {traceback.format_exc()}")
@@ -181,13 +181,13 @@ def arxiv_search(query: str) -> str:
     try:
         search_docs = ArxivLoader(query=query, load_max_docs=3).load()
         logger.info(f"TOOL: arxiv_search found {len(search_docs)} documents")
-        
+
         formatted_search_docs = "\n\n---\n\n".join(
             [
                 f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/>\n{doc.page_content[:1000]}\n</Document>'
                 for doc in search_docs
             ])
-        
+
         result = {"arxiv_results": formatted_search_docs}
         logger.info(f"TOOL RESULT: arxiv_search completed successfully")
         return result
@@ -213,15 +213,15 @@ logger.info("=== BUILDING RETRIEVER ===")
 try:
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
     logger.info("HuggingFace embeddings initialized")
-    
+
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_KEY")
     if not supabase_url or not supabase_key:
         raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in the environment.")
-        
+
     supabase: Client = create_client(supabase_url, supabase_key)
     logger.info("Supabase client created")
-    
+
     vector_store = SupabaseVectorStore(
         client=supabase,
         embedding=embeddings,
@@ -229,14 +229,13 @@ try:
         query_name="match_documents",
     )
     logger.info("Vector store initialized")
-    
+
     retriever_tool = create_retriever_tool(
         retriever=vector_store.as_retriever(),
         name="Question_Search",
         description="A tool to retrieve similar questions from a vector store.",
     )
     logger.info("Retriever tool created successfully")
-    
 except Exception as e:
     logger.error(f"Failed to initialize retriever: {e}")
     logger.error(f"Retriever initialization traceback: {traceback.format_exc()}")
@@ -255,33 +254,91 @@ tools = [
 ]
 if retriever_tool:
     tools.append(retriever_tool)
-
-
 logger.info(f"Tools initialized: {[tool.name for tool in tools]}")
 
-def get_llm(provider: str = "groq"):
-    """Initializes and returns the specified LLM, with a fallback to Groq."""
+class LLMManager:
+    """
+    Manages LLM providers with a fallback and cooldown mechanism.
+    """
+    def __init__(self, llms_with_tools: dict, provider_order: list):
+        """
+        Args:
+            llms_with_tools: A dictionary of provider names to their LLM instances with tools bound.
+            provider_order: A list of provider names in the desired fallback order.
+        """
+        self.llms = llms_with_tools
+        self.provider_order = provider_order
+        self.cooldowns = {provider: 0 for provider in self.llms.keys()}
+
+    def invoke(self, messages: MessagesState):
+        """
+        Invokes the next available LLM based on the fallback order and cooldowns.
+        """
+        for provider in self.provider_order:
+            if provider not in self.llms:
+                logger.warning(f"Provider '{provider}' in order list but not initialized.")
+                continue
+
+            if time.time() < self.cooldowns.get(provider, 0):
+                logger.warning(f"Provider '{provider}' is on cooldown. Skipping.")
+                continue
+
+            logger.info(f"Attempting to use LLM provider: {provider}")
+            llm = self.llms[provider]
+            try:
+                # Successful invocation, return the result
+                response = llm.invoke(messages)
+                logger.info(f"LLM provider '{provider}' succeeded.")
+                return response
+            except Exception as e:
+                logger.error(f"LLM provider '{provider}' failed: {e}")
+
+                if provider == 'google':
+                    # Specific logic for Google LLM failure
+                    cooldown_duration = 60
+                    self.cooldowns['google'] = time.time() + cooldown_duration
+                    logger.info(f"Google LLM failed. Placing on a {cooldown_duration}s cooldown.")
+                    logger.info("Immediately trying Groq as a specific fallback.")
+                    
+                    try:
+                        # Nested attempt to use Groq immediately
+                        response = self.llms['groq'].invoke(messages)
+                        logger.info("Fallback to Groq succeeded.")
+                        return response
+                    except Exception as e_groq:
+                        logger.error(f"Fallback Groq LLM also failed: {e_groq}")
+                        # Put Groq on its own cooldown if it fails here
+                        groq_cooldown_duration_ms = 60
+                        self.cooldowns['groq'] = time.time() + (groq_cooldown_duration_ms / 1000.0)
+                        logger.info(f"Groq LLM failed during fallback. Placing on a {groq_cooldown_duration_ms}ms cooldown.")
+                        # Continue to the next provider in the main list
+                        
+                elif provider == 'groq':
+                    # Logic for Groq LLM failure
+                    cooldown_duration_ms = 60
+                    self.cooldowns['groq'] = time.time() + (cooldown_duration_ms / 1000.0)
+                    logger.info(f"Groq LLM failed. Placing on a {cooldown_duration_ms}ms cooldown.")
+
+        # If all providers in the list have failed
+        raise Exception("All available LLM providers failed.")
+
+def get_llm(provider: str):
+    """Initializes and returns the specified LLM."""
     if provider == "google":
         try:
-            logger.info("Attempting to initialize Google Gemini LLM")
-            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
-            # A simple test to see if the API key is valid and the service is available
-            llm.invoke("test")
-            logger.info("Google Gemini LLM initialized successfully.")
-            return llm
+            logger.info("Initializing Google Gemini LLM")
+            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
         except Exception as e:
-            logger.warning(f"Failed to initialize Google Gemini LLM: {e}. Falling back to Groq.")
-            provider = "groq"
-
-    if provider == "groq":
+            logger.error(f"Failed to initialize Google Gemini LLM: {e}")
+            return None
+    elif provider == "groq":
         try:
             logger.info("Initializing Groq LLM")
             return ChatGroq(model="llama3-70b-8192", temperature=0)
         except Exception as e:
             logger.error(f"Failed to initialize Groq LLM: {e}")
-            raise
-
-    if provider == "huggingface":
+            return None
+    elif provider == "huggingface":
         try:
             logger.info("Initializing HuggingFace LLM")
             return ChatHuggingFace(
@@ -292,62 +349,67 @@ def get_llm(provider: str = "groq"):
             )
         except Exception as e:
             logger.error(f"Failed to initialize HuggingFace LLM: {e}")
-            raise
-            
-    raise ValueError(f"Invalid or failed to initialize provider: {provider}")
-
+            return None
+    else:
+        logger.error(f"Invalid LLM provider specified: {provider}")
+        return None
 
 # Build graph function
 def build_graph():
     """Build the graph"""
-    
     try:
-        llm = get_llm() # Automatically handles fallback
+        # 1. Initialize all potential LLMs
+        llm_providers = {
+            "google": get_llm("google"),
+            "groq": get_llm("groq"),
+            "huggingface": get_llm("huggingface")
+        }
         
-        # Bind tools to LLM
-        llm_with_tools = llm.bind_tools(tools)
-        logger.info("Tools bound to LLM")
+        # Filter out any providers that failed to initialize
+        initialized_llms = {name: llm for name, llm in llm_providers.items() if llm}
+        if not initialized_llms:
+            raise RuntimeError("No LLMs could be initialized. The application cannot start.")
+            
+        logger.info(f"Successfully initialized LLMs: {list(initialized_llms.keys())}")
+
+        # 2. Bind tools to each initialized LLM
+        llms_with_tools = {
+            name: llm.bind_tools(tools) for name, llm in initialized_llms.items()
+        }
+        logger.info("Tools bound to all initialized LLMs")
+
+        # 3. Create the LLMManager with a defined fallback order
+        # The primary attempt will be Google, then Groq, then HuggingFace.
+        fallback_order = ["google", "groq", "huggingface"]
+        llm_manager = LLMManager(llms_with_tools, fallback_order)
 
         # Node
         def assistant(state: MessagesState):
-            """Assistant node"""
+            """Assistant node that uses the LLMManager for robust invocation"""
             logger.info("=== ASSISTANT NODE CALLED ===")
             logger.info(f"Assistant received {len(state['messages'])} messages")
             
             try:
-                # Log the last message (user input)
-                if state["messages"]:
-                    last_msg = state["messages"][-1]
-                    logger.info(f"Last message type: {type(last_msg).__name__}")
-                    logger.info(f"Last message content (first 100 chars): {str(last_msg.content)[:100]}...")
+                # Use the LLMManager to handle the call
+                response = llm_manager.invoke(state["messages"])
                 
-                logger.info("Calling LLM...")
-                response = llm_with_tools.invoke(state["messages"])
                 logger.info(f"LLM response type: {type(response).__name__}")
-                logger.info(f"LLM response content (first 200 chars): {str(response.content)[:200]}...")
-                
-                # Check if LLM wants to use tools
                 if hasattr(response, 'tool_calls') and response.tool_calls:
                     logger.info(f"LLM requested {len(response.tool_calls)} tool calls")
-                    for i, tool_call in enumerate(response.tool_calls):
-                        logger.info(f"Tool call {i+1}: {tool_call.get('name', 'unknown')} with args: {tool_call.get('args', {})}")
                 else:
                     logger.info("LLM did not request any tool calls")
-                
+                    
                 logger.info("=== ASSISTANT NODE COMPLETED ===")
                 return {"messages": [response]}
-                
             except Exception as e:
                 logger.error(f"ASSISTANT NODE ERROR: {str(e)}")
                 logger.error(f"ASSISTANT NODE TRACEBACK: {traceback.format_exc()}")
-                # Return an error message instead of crashing
-                error_msg = HumanMessage(content=f"I encountered an error: {str(e)}")
+                error_msg = HumanMessage(content=f"I encountered an error after trying all fallbacks: {str(e)}")
                 return {"messages": [error_msg]}
 
         def retriever(state: MessagesState):
             """Retriever node"""
             logger.info("=== RETRIEVER NODE CALLED ===")
-            
             try:
                 if vector_store is None:
                     logger.warning("Vector store not available, skipping retrieval")
@@ -355,14 +417,12 @@ def build_graph():
                 
                 query = state["messages"][0].content
                 logger.info(f"Searching for similar questions with query: {query[:100]}...")
-                
                 similar_question = vector_store.similarity_search(query)
                 logger.info(f"Found {len(similar_question)} similar questions")
                 
                 if similar_question:
                     example_content = similar_question[0].page_content
                     logger.info(f"Using similar question (first 100 chars): {example_content[:100]}...")
-                    
                     example_msg = HumanMessage(
                         content=f"Here I provide a similar question and answer for reference: \n\n{example_content}",
                     )
@@ -370,14 +430,12 @@ def build_graph():
                 else:
                     logger.info("No similar questions found")
                     result = {"messages": [sys_msg] + state["messages"]}
-                
+                    
                 logger.info("=== RETRIEVER NODE COMPLETED ===")
                 return result
-                
             except Exception as e:
                 logger.error(f"RETRIEVER NODE ERROR: {str(e)}")
                 logger.error(f"RETRIEVER NODE TRACEBACK: {traceback.format_exc()}")
-                # Fallback to just system message + user messages
                 return {"messages": [sys_msg] + state["messages"]}
 
         logger.info("Building state graph...")
@@ -393,12 +451,11 @@ def build_graph():
             tools_condition,
         )
         builder.add_edge("tools", "assistant")
-
+        
         logger.info("Compiling graph...")
         graph = builder.compile()
         logger.info("=== GRAPH BUILT SUCCESSFULLY ===")
         return graph
-        
     except Exception as e:
         logger.error(f"GRAPH BUILD ERROR: {str(e)}")
         logger.error(f"GRAPH BUILD TRACEBACK: {traceback.format_exc()}")
