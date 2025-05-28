@@ -122,7 +122,7 @@ def wiki_search(query: str) -> str:
         return {"wiki_results": f"Error searching Wikipedia: {str(e)}"}
 
 @tool
-def serper_web_search(query: str) -> str:
+def web_search(query: str) -> str:
     """Search the web using Serper API and return maximum 5 results.
     Args:
         query: The search query."""
@@ -249,7 +249,7 @@ tools = [
     divide,
     modulus,
     wiki_search,
-    serper_web_search,
+    web_search,
     arxiv_search,
 ]
 if retriever_tool:
