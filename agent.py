@@ -2,6 +2,7 @@ import os
 import traceback
 import requests
 import time
+from typing import Optional
 from dotenv import load_dotenv
 from langgraph.graph import START, StateGraph, MessagesState
 from langgraph.prebuilt import tools_condition
