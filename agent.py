@@ -226,7 +226,7 @@ try:
         client=supabase,
         embedding=embeddings,
         table_name="documents",
-        query_name="match_documents_langchain",
+        query_name="match_documents",
     )
     logger.info("Vector store initialized")
     
