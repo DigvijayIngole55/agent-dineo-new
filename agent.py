@@ -2,6 +2,12 @@ import os
 import traceback
 import requests
 import time
+import tempfile
+import uuid
+import pandas as pd
+from urllib.parse import urlparse
+from PIL import Image
+import pytesseract
 from typing import Optional
 from dotenv import load_dotenv
 from langgraph.graph import START, StateGraph, MessagesState
@@ -238,6 +244,40 @@ def download_file_from_url(url: str, filename: Optional[str] = None) -> str:
         return f"Error downloading file: {str(e)}"
 
 @tool
+def analyze_youtube_video(url: str) -> str:
+    """
+    Analyze a YouTube video by extracting metadata and transcript.
+    Args:
+        url (str): YouTube video URL
+    """
+    try:
+        import re
+        # Extract video ID from URL
+        video_id_match = re.search(r'(?:v=|\/embed\/|\/v\/|\.be\/)([a-zA-Z0-9_-]{11})', url)
+        if not video_id_match:
+            return "Error: Could not extract video ID from URL"
+        
+        video_id = video_id_match.group(1)
+        
+        # Try to get video metadata using web search
+        search_query = f"site:youtube.com {video_id} video title description"
+        metadata_result = web_search(search_query)
+        
+        result = f"YouTube Video Analysis for: {url}\n"
+        result += f"Video ID: {video_id}\n\n"
+        result += f"Metadata search results:\n{metadata_result}\n\n"
+        
+        # Try to search for transcripts
+        transcript_query = f"youtube video {video_id} transcript subtitles"
+        transcript_result = web_search(transcript_query)
+        result += f"Transcript search results:\n{transcript_result}\n"
+        
+        return result
+        
+    except Exception as e:
+        return f"Error analyzing YouTube video: {str(e)}"
+
+@tool
 def extract_text_from_image(image_path: str) -> str:
     """
     Extract text from an image using OCR library pytesseract (if available).
@@ -255,21 +295,60 @@ def extract_text_from_image(image_path: str) -> str:
         return f"Error extracting text from image: {str(e)}"
 
 @tool
-def analyze_csv_file(file_path: str, query: str) -> str:
+def read_file_content(file_path: str) -> str:
+    """
+    Read content from any file.
+    Args:
+        file_path (str): the path to the file to read
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return f"File content ({len(content)} characters):\n{content}"
+    except UnicodeDecodeError:
+        try:
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            return f"Binary file ({len(content)} bytes). Cannot display content as text."
+        except Exception as e:
+            return f"Error reading file: {str(e)}"
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+@tool
+def analyze_csv_file(file_path: str, query: str = "") -> str:
     """
     Analyze a CSV file using pandas and answer a question about it.
     Args:
         file_path (str): the path to the CSV file.
-        query (str): Question about the data
+        query (str): Question about the data (optional)
     """
     try:
         df = pd.read_csv(file_path)
-
-        result = f"CSV file loaded with {len(df)} rows and {len(df.columns)} columns.\n"
-        result += f"Columns: {', '.join(df.columns)}\n\n"
-
-        result += "Summary statistics:\n"
-        result += str(df.describe())
+        
+        result = f"CSV Analysis:\n"
+        result += f"- Rows: {len(df)}, Columns: {len(df.columns)}\n"
+        result += f"- Column names: {list(df.columns)}\n\n"
+        
+        # Show first few rows
+        result += "First 5 rows:\n"
+        result += str(df.head()) + "\n\n"
+        
+        # Show data types
+        result += "Data types:\n"
+        result += str(df.dtypes) + "\n\n"
+        
+        # Show summary statistics for numeric columns
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        if len(numeric_cols) > 0:
+            result += "Summary statistics (numeric columns):\n"
+            result += str(df[numeric_cols].describe()) + "\n\n"
+        
+        # Calculate totals for numeric columns if requested
+        if "total" in query.lower() or "sum" in query.lower():
+            for col in numeric_cols:
+                total = df[col].sum()
+                result += f"Total {col}: {total}\n"
 
         return result
 
@@ -277,23 +356,39 @@ def analyze_csv_file(file_path: str, query: str) -> str:
         return f"Error analyzing CSV file: {str(e)}"
 
 @tool
-def analyze_excel_file(file_path: str, query: str) -> str:
+def analyze_excel_file(file_path: str, query: str = "") -> str:
     """
     Analyze an Excel file using pandas and answer a question about it.
     Args:
         file_path (str): the path to the Excel file.
-        query (str): Question about the data
+        query (str): Question about the data (optional)
     """
     try:
         df = pd.read_excel(file_path)
-
-        result = (
-            f"Excel file loaded with {len(df)} rows and {len(df.columns)} columns.\n"
-        )
-        result += f"Columns: {', '.join(df.columns)}\n\n"
-
-        result += "Summary statistics:\n"
-        result += str(df.describe())
+        
+        result = f"Excel Analysis:\n"
+        result += f"- Rows: {len(df)}, Columns: {len(df.columns)}\n"
+        result += f"- Column names: {list(df.columns)}\n\n"
+        
+        # Show first few rows
+        result += "First 5 rows:\n"
+        result += str(df.head()) + "\n\n"
+        
+        # Show data types
+        result += "Data types:\n"
+        result += str(df.dtypes) + "\n\n"
+        
+        # Show summary statistics for numeric columns
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        if len(numeric_cols) > 0:
+            result += "Summary statistics (numeric columns):\n"
+            result += str(df[numeric_cols].describe()) + "\n\n"
+        
+        # Calculate totals for numeric columns if requested
+        if "total" in query.lower() or "sum" in query.lower():
+            for col in numeric_cols:
+                total = df[col].sum()
+                result += f"Total {col}: {total}\n"
 
         return result
 
@@ -343,10 +438,12 @@ tools = [
     wiki_search,
     arxiv_search,
     save_and_read_file,
+    read_file_content,
     analyze_excel_file,
     analyze_csv_file,
     extract_text_from_image,
     download_file_from_url,
+    analyze_youtube_video,
     
 ]
 if retriever_tool:
@@ -392,6 +489,9 @@ def build_graph(provider: str = "groq"):
         # Groq https://console.groq.com/docs/models
         llm = ChatGroq(model="qwen-qwq-32b", temperature=0)
         # llm = ChatGroq(model="deepseek-r1-distill-llama-70b", temperature=0)
+    elif provider == "google":
+        # Google Gemini for video and multimodal tasks
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
     elif provider == "huggingface":
         llm = ChatHuggingFace(
             llm=HuggingFaceEndpoint(
@@ -405,7 +505,7 @@ def build_graph(provider: str = "groq"):
             verbose=True,
         )
     else:
-        raise ValueError("Invalid provider. Choose 'groq' or 'huggingface'.")
+        raise ValueError("Invalid provider. Choose 'groq', 'google', or 'huggingface'.")
 
     llm_with_tools = llm.bind_tools(tools)
 
@@ -438,8 +538,6 @@ def build_graph(provider: str = "groq"):
     return builder.compile()
 
 if __name__ == "__main__":
-    question = "How many studio albums were published by Mercedes Sosa between 2000 and 2009 (included)? You can use the latest 2022 version of english wikipedia."
-    # question = """Q is Examine the video at https://www.youtube.com/watch?v=1htKBjuUWec. What does Teal'c say in response to the question "Isn't that hot?"""
     graph = build_graph(provider="groq")
     messages = [HumanMessage(content=question)]
     messages = graph.invoke({"messages": messages})
