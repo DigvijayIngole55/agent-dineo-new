@@ -18,3 +18,4 @@ wikipedia
 pgvector
 python-dotenv
 pandas
+sentence-transformers
