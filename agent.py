@@ -7,7 +7,8 @@ import uuid
 import pandas as pd
 from urllib.parse import urlparse
 from PIL import Image
-import pytesseract
+import base64
+import io
 from typing import Optional
 from dotenv import load_dotenv
 from langgraph.graph import START, StateGraph, MessagesState
@@ -280,17 +281,33 @@ def analyze_youtube_video(url: str) -> str:
 @tool
 def extract_text_from_image(image_path: str) -> str:
     """
-    Extract text from an image using OCR library pytesseract (if available).
+    Extract text from an image using Gemini vision capabilities.
     Args:
         image_path (str): the path to the image file.
     """
     try:
-        image = Image.open(image_path)
-
-        # Extract text from the image
-        text = pytesseract.image_to_string(image)
-
-        return f"Extracted text from image:\n\n{text}"
+        from langchain_core.messages import HumanMessage
+        
+        # Initialize Gemini model
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
+        
+        # Read and encode image
+        with open(image_path, "rb") as image_file:
+            image_data = image_file.read()
+            image_base64 = base64.b64encode(image_data).decode()
+        
+        # Create message with image
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": "Please extract all text from this image. Return only the text content without any additional commentary."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+            ]
+        )
+        
+        # Get response from Gemini
+        response = llm.invoke([message])
+        
+        return f"Extracted text from image:\n\n{response.content}"
     except Exception as e:
         return f"Error extracting text from image: {str(e)}"
 
@@ -538,6 +555,8 @@ def build_graph(provider: str = "groq"):
     return builder.compile()
 
 if __name__ == "__main__":
+    question = "How many studio albums were published by Mercedes Sosa between 2000 and 2009 (included)? You can use the latest 2022 version of english wikipedia."
+    # question = """Q is Examine the video at https://www.youtube.com/watch?v=1htKBjuUWec. What does Teal'c say in response to the question "Isn't that hot?"""
     graph = build_graph(provider="groq")
     messages = [HumanMessage(content=question)]
     messages = graph.invoke({"messages": messages})
