@@ -19,6 +19,7 @@ from langchain_groq import ChatGroq
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFaceEmbeddings
 from langchain_community.document_loaders import WikipediaLoader
 from langchain_community.document_loaders import ArxivLoader
+from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_community.vectorstores import SupabaseVectorStore
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.tools import tool
@@ -120,6 +121,31 @@ def wiki_search(query: str) -> str:
         print(f"TOOL ERROR: wiki_search traceback - {traceback.format_exc()}")
         return {"wiki_results": f"Error searching Wikipedia: {str(e)}"}
 
+# @tool
+# def web_search(query: str) -> str:
+#     """Search the web using Tavily API and return maximum 5 results.
+#     Args:
+#         query: The search query."""
+#     print(f"TOOL: tavily_web_search('{query[:50]}...')")
+#     try:
+#         search_tool = TavilySearchResults(max_results=5)
+#         search_docs = search_tool.invoke(query)
+#         print(f"TOOL: tavily_web_search found {len(search_docs)} results")
+#         
+#         # Format the results
+#         formatted_results = []
+#         for doc in search_docs:
+#             formatted_result = f'<Document source="{doc.get("url", "")}" title="{doc.get("title", "")}"/>\n{doc.get("content", "")}\n</Document>'
+#             formatted_results.append(formatted_result)
+#         formatted_search_docs = "\n\n---\n\n".join(formatted_results)
+#         result = {"web_results": formatted_search_docs}
+#         print(f"TOOL RESULT: tavily_web_search returned: {result}")
+#         return result
+#     except Exception as e:
+#         print(f"TOOL ERROR: tavily_web_search failed - {str(e)}")
+#         print(f"TOOL ERROR: tavily_web_search traceback - {traceback.format_exc()}")
+#         return {"web_results": f"Error during web search: {str(e)}"}
+
 @tool
 def web_search(query: str) -> str:
     """Search the web using Serper API and return maximum 5 results.
@@ -145,6 +171,7 @@ def web_search(query: str) -> str:
         response.raise_for_status()
         data = response.json()
         print(f"TOOL: serper_web_search got response with {len(data.get('organic', []))} results")
+        print(f"TOOL DEBUG: Full Serper API response: {data}")
         # Format the results
         formatted_results = []
         for res in data.get('organic', [])[:5]:
@@ -152,7 +179,7 @@ def web_search(query: str) -> str:
             formatted_results.append(formatted_result)
         formatted_search_docs = "\n\n---\n\n".join(formatted_results)
         result = {"web_results": formatted_search_docs}
-        print(f"TOOL RESULT: serper_web_search returned: {result}")
+        print(f"TOOL RESULT: serper_web_search returned: {len(formatted_search_docs)} chars")
         return result
     except requests.exceptions.RequestException as e:
         print(f"TOOL ERROR: serper_web_search network error - {str(e)}")
@@ -426,6 +453,7 @@ try:
         raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in the environment.")
     supabase: Client = create_client(supabase_url, supabase_key)
     print("Supabase client created")
+    
     vector_store = SupabaseVectorStore(
         client=supabase,
         embedding=embeddings,
@@ -433,6 +461,67 @@ try:
         query_name="match_documents",
     )
     print("Vector store initialized")
+    
+    # Patch the vector store to handle JSON string embeddings
+    import json
+    import numpy as np
+    from langchain.schema import Document
+    
+    def _cosine_similarity(a, b):
+        """Calculate cosine similarity between two vectors."""
+        a = np.array(a)
+        b = np.array(b)
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return float(np.dot(a, b) / (norm_a * norm_b))
+    
+    def patched_similarity_search(self, query, k=3):
+        """Patched similarity search that handles JSON string embeddings."""
+        query_embedding = self.embeddings.embed_query(query)
+        
+        # Get all documents
+        result = self._client.table(self.table_name).select("*").execute()
+        
+        similarities = []
+        for doc in result.data:
+            doc_embedding_str = doc.get('embedding')
+            if doc_embedding_str:
+                try:
+                    doc_embedding = json.loads(doc_embedding_str)
+                    if len(doc_embedding) == 768:
+                        similarity = _cosine_similarity(query_embedding, doc_embedding)
+                        similarities.append({
+                            'doc': doc,
+                            'similarity': similarity
+                        })
+                except:
+                    continue
+        
+        # Sort by similarity
+        similarities.sort(key=lambda x: x['similarity'], reverse=True)
+        
+        # Convert to Document objects
+        documents = []
+        for sim in similarities[:k]:
+            if sim['similarity'] > 0.1:  # Filter threshold
+                doc = Document(
+                    page_content=sim['doc']['content'],
+                    metadata={
+                        'id': sim['doc']['id'],
+                        'similarity': sim['similarity'],
+                        'source': sim['doc'].get('metadata', {})
+                    }
+                )
+                documents.append(doc)
+        
+        return documents
+    
+    # Apply the patch
+    vector_store.similarity_search = patched_similarity_search.__get__(vector_store, SupabaseVectorStore)
+    print("Vector store patched for JSON string embeddings")
+    
     retriever_tool = create_retriever_tool(
         retriever=vector_store.as_retriever(),
         name="Question_Search",
@@ -530,34 +619,71 @@ def build_graph(provider: str = "groq"):
         """Assistant Node"""
         return {"messages": [llm_with_tools.invoke(state['messages'])]}
 
-    # def retriever(state: MessagesState):
-    #     """Retriever Node"""
-    #     # Extract the latest message content
-    #     query = state['messages'][-1].content
-    #     similar_question = vector_store.similarity_search(query, k = 2)
-    #     if similar_question:  
-    #         example_msg = HumanMessage(
-    #             content=f"Here I provide a similar question and answer for reference: \n\n{similar_question[0].page_content}",
-    #         )
-    #         return {"messages": [sys_msg] + state["messages"] + [example_msg]}
-    #     else:
-    #         return {"messages": [sys_msg] + state["messages"]}
-
+    def retriever(state: MessagesState):
+        """Retriever Node - Search vector store first"""
+        query = state['messages'][-1].content
+        print(f"🔍 RETRIEVER NODE: Searching vector store for: {query[:50]}...")
+        
+        try:
+            if vector_store:
+                similar_docs = vector_store.similarity_search(query, k=3)
+                print(f"📊 RETRIEVER: Found {len(similar_docs)} similar documents")
+                
+                if similar_docs:
+                    # Add retriever results to conversation
+                    retriever_content = "Similar questions found in database:\n\n"
+                    for i, doc in enumerate(similar_docs):
+                        similarity = doc.metadata.get('similarity', 0) if hasattr(doc, 'metadata') else 0
+                        print(f"  📄 Doc {i+1} (similarity: {similarity:.4f}): {doc.page_content[:100]}...")
+                        retriever_content += f"{i+1}. {doc.page_content}\n\n"
+                    
+                    example_msg = HumanMessage(
+                        content=f"Here are similar questions from the database for reference:\n\n{retriever_content}"
+                    )
+                    return {"messages": [sys_msg] + state["messages"] + [example_msg]}
+                else:
+                    print("  ❌ RETRIEVER: No similar documents found")
+                    return {"messages": [sys_msg] + state["messages"]}
+            else:
+                print("  ⚠️ RETRIEVER: Vector store not available")
+                return {"messages": [sys_msg] + state["messages"]}
+        except Exception as e:
+            print(f"  ⚠️ RETRIEVER ERROR: {str(e)}")
+            return {"messages": [sys_msg] + state["messages"]}
 
     builder = StateGraph(MessagesState)
-    # builder.add_node("retriever", retriever)
+    builder.add_node("retriever", retriever)
     builder.add_node("assistant", assistant)
     builder.add_node("tools", ToolNode(tools))
-    builder.add_edge(START, "assistant")
-    # builder.add_edge("retriever", "assistant")
+    builder.add_edge(START, "retriever")
+    builder.add_edge("retriever", "assistant")
     builder.add_conditional_edges("assistant", tools_condition)
     builder.add_edge("tools", "assistant")
     return builder.compile()
 
 if __name__ == "__main__":
-
+    question = "How many studio albums were published by Mercedes Sosa between 2000 and 2009 (included)? You can use the latest 2022 version of english wikipedia."
+    # question = """Examine the video at https://www.youtube.com/watch?v=1htKBjuUWec. What does Teal'c say in response to the question "Isn't that hot?"""
     graph = build_graph(provider="groq")
     messages = [HumanMessage(content=question)]
+    
+    print("\n=== STARTING GRAPH EXECUTION ===")
     messages = graph.invoke({"messages": messages})
-    for m in messages["messages"]:
+    
+    print("\n=== GRAPH EXECUTION COMPLETE ===")
+    print(f"Total messages in result: {len(messages['messages'])}")
+    
+    for i, m in enumerate(messages["messages"]):
+        print(f"\n=== MESSAGE {i+1} ===")
+        print(f"Type: {type(m).__name__}")
+        if hasattr(m, 'tool_calls') and m.tool_calls:
+            print(f"Tool calls: {len(m.tool_calls)}")
+            for j, tool_call in enumerate(m.tool_calls):
+                print(f"  Tool call {j+1}: {tool_call}")
+        if hasattr(m, 'content'):
+            print(f"Content length: {len(str(m.content))} chars")
+            if len(str(m.content)) > 500:
+                print(f"Content preview: {str(m.content)[:500]}...")
+            else:
+                print(f"Content: {m.content}")
         m.pretty_print()
