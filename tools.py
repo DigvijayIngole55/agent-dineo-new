@@ -310,33 +310,48 @@ def analyze_image(image_path: str) -> str:
             
         # Try to extract text from image using OCR
         try:
-            import pytesseract
             from PIL import Image
+            import base64
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            from langchain_core.messages import HumanMessage
             
-            debug_print("Successfully imported pytesseract and PIL")
+            debug_print("Successfully imported PIL and Gemini dependencies")
             
             image = Image.open(image_path)
             debug_print(f"Image opened: {image.format}, size={image.size}, mode={image.mode}")
             
-            text = pytesseract.image_to_string(image)
-            debug_print(f"Extracted text length: {len(text)}")
+            # Initialize Gemini model
+            llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
+            
+            # Read and encode image
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+                image_base64 = base64.b64encode(image_data).decode()
+            
+            # Create message with image
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": "Analyze this image and extract any text present. Also describe what you see in the image."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                ]
+            )
+            
+            # Get response from Gemini
+            response = llm.invoke([message])
+            debug_print(f"Gemini response length: {len(response.content)}")
             
             result = f"Image Analysis:\n"
             result += f"Path: {image_path}\n"
             result += f"Format: {image.format}\n"
             result += f"Size: {image.size}\n"
             result += f"Mode: {image.mode}\n"
-            
-            if text.strip():
-                result += f"\nExtracted text:\n{text}"
-            else:
-                result += "\nNo text detected in image."
+            result += f"\nGemini Analysis:\n{response.content}"
                 
             return result
             
-        except ImportError:
-            debug_print("pytesseract not installed")
-            return f"Image file found: {image_path}\nError: pytesseract is not installed. Please install it with 'pip install pytesseract' and ensure Tesseract OCR is installed on your system."
+        except ImportError as e:
+            debug_print(f"Import error: {str(e)}")
+            return f"Image file found: {image_path}\nError: Required dependencies not installed. Please ensure langchain_google_genai is installed."
         except Exception as e:
             debug_print(f"Error extracting text from image: {str(e)}")
             return f"Error analyzing image: {str(e)}"
@@ -499,26 +514,44 @@ def download_from_url(url: str, filename: Optional[str] = None) -> str:
         return f"Error downloading file: {str(e)}"
 
 def extract_text_from_image(image_path: str) -> str:
-    """Extract text from an image using pytesseract."""
+    """Extract text from an image using Gemini vision."""
     debug_print(f"Attempting to extract text from image: {image_path}")
     try:
-        import pytesseract
         from PIL import Image
+        import base64
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_core.messages import HumanMessage
         
-        debug_print("Successfully imported pytesseract and PIL")
+        debug_print("Successfully imported PIL and Gemini dependencies")
         
         debug_print(f"Opening image file: {image_path}")
         image = Image.open(image_path)
         debug_print(f"Image opened: {image.format}, size={image.size}, mode={image.mode}")
         
-        debug_print("Starting OCR text extraction")
-        text = pytesseract.image_to_string(image)
-        debug_print(f"Extracted text length: {len(text)}")
+        # Initialize Gemini model
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
         
-        return f"Extracted text from image:\n\n{text}"
-    except ImportError:
-        debug_print("pytesseract not installed")
-        return "Error: pytesseract is not installed. Please install it with 'pip install pytesseract' and ensure Tesseract OCR is installed on your system."
+        # Read and encode image
+        with open(image_path, "rb") as image_file:
+            image_data = image_file.read()
+            image_base64 = base64.b64encode(image_data).decode()
+        
+        # Create message with image
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": "Please extract all text from this image. Return only the text content without any additional commentary."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+            ]
+        )
+        
+        debug_print("Starting Gemini text extraction")
+        response = llm.invoke([message])
+        debug_print(f"Extracted text length: {len(response.content)}")
+        
+        return f"Extracted text from image:\n\n{response.content}"
+    except ImportError as e:
+        debug_print(f"Dependencies not installed: {str(e)}")
+        return "Error: Required dependencies not installed. Please ensure langchain_google_genai is installed."
     except Exception as e:
         debug_print(f"Error extracting text from image: {str(e)}")
         return f"Error extracting text from image: {str(e)}"
